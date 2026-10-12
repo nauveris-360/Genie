@@ -9,7 +9,7 @@ import { parseOrThrow } from '../../lib/validate.js';
 import { toIso } from '../../lib/time.js';
 import { normalizeEmail } from '../../lib/strings.js';
 import { verifyPassword } from '../../auth/password.js';
-import { createSession, deleteSession } from '../../auth/session.js';
+import { type CreatedSession, createSession, deleteSession } from '../../auth/session.js';
 import { requireUser } from '../../auth/plugin.js';
 import { clear, release, reserve } from '../../auth/rateLimit.js';
 import { clientKey } from '../../lib/clientKey.js';
@@ -19,7 +19,7 @@ const loginSchema = z.object({
   password: z.string().min(1).max(512),
 });
 
-async function loadMe(userId: string): Promise<AuthMe> {
+export async function loadMe(userId: string): Promise<AuthMe> {
   return withClient(async (client) => {
     const userRes = await client.query<{ id: string; email: string; display_name: string; created_at: Date }>(
       'SELECT id, email, display_name, created_at FROM users WHERE id = $1',
@@ -51,9 +51,16 @@ function cookieOptions(secure: boolean, httpOnly: boolean, expires: Date) {
   return { path: '/', httpOnly, secure, sameSite: 'lax' as const, expires };
 }
 
-export async function authRoutes(app: FastifyInstance): Promise<void> {
+/** Sets the HttpOnly session cookie and the readable CSRF cookie for a newly created session. */
+export function setSessionCookies(reply: FastifyReply, created: CreatedSession): void {
   const config = loadConfig();
   const secure = config.nodeEnv === 'production';
+  reply.setCookie(config.sessionCookieName, created.token, cookieOptions(secure, true, created.expiresAt));
+  reply.setCookie(config.csrfCookieName, created.csrfToken, cookieOptions(secure, false, created.expiresAt));
+}
+
+export async function authRoutes(app: FastifyInstance): Promise<void> {
+  const config = loadConfig();
 
   /**
    * Login throttling uses two buckets, both keyed on the client IP (request.ip,
@@ -105,8 +112,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       await clear(client, pairKey);
     });
     const created = await withClient((client) => createSession(client, user.id));
-    reply.setCookie(config.sessionCookieName, created.token, cookieOptions(secure, true, created.expiresAt));
-    reply.setCookie(config.csrfCookieName, created.csrfToken, cookieOptions(secure, false, created.expiresAt));
+    setSessionCookies(reply, created);
 
     const me = await loadMe(user.id);
     return reply.code(200).send({ data: me });

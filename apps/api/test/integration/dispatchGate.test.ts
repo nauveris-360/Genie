@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { call, FREE_MODEL, freshDatabase, PAID_MODEL, seedWorkspace, startApp, submitTask, teardown, type TestApp } from './helpers.js';
 import { getPool } from '../../src/db/index.js';
 import { recordTrustedVerification } from '../../src/policy/freeFirst.js';
-import { TaskService } from '../../src/modules/tasks/service.js';
+import { boundPayload, TaskService } from '../../src/modules/tasks/service.js';
+import { payloadDigest } from '../../src/lib/digest.js';
 
 let t: TestApp;
 before(async () => { await freshDatabase(); t = await startApp(); });
@@ -25,6 +26,17 @@ async function pending(W: Workspace, key: string, type = 'chat', agentId = W.age
   const task = res.json().data;
   assert.equal(task.status, 'awaiting_approval');
   return task as { id: string; approvalId: string };
+}
+/** Rewrites an approval as a legacy v1 approval (payload-only digest), as if created before migration 006. */
+async function downgradeToV1(W: Workspace, task: { id: string; approvalId: string }) {
+  const c = await getPool().connect();
+  try {
+    await c.query('BEGIN');
+    await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [W.tenantId]);
+    const row = (await c.query('SELECT * FROM tasks WHERE id = $1', [task.id])).rows[0];
+    await c.query('UPDATE approvals SET digest_version = 1, payload_digest = $2 WHERE id = $1', [task.approvalId, payloadDigest(boundPayload(row))]);
+    await c.query('COMMIT');
+  } finally { c.release(); }
 }
 async function approveAndExpectBlocked(W: Workspace, task: { id: string; approvalId: string }, reason: RegExp) {
   const res = await call(t, 'POST', `/api/v1/tenants/${W.tenantId}/approvals/${task.approvalId}/decision`, { session: W.owner, payload: { decision: 'approve' } });
@@ -56,14 +68,19 @@ test('control: an unchanged approved task is dispatched exactly once with the ch
   assert.equal((await call(t, 'GET', `/api/v1/tenants/${W.tenantId}/tasks/${task.id}`, { session: W.owner })).json().data.status, 'succeeded');
 });
 
-test('agent switched to a paid model after submission, fallback OFF at approval: blocked', async () => {
+test('agent switched to a paid model after submission: refused at decision (v2), and blocked at dispatch for a legacy v1 approval', async () => {
   const W = await seedWorkspace(t, 'gate-switch', true);
   const base = `/api/v1/tenants/${W.tenantId}`;
-  const task = await pending(W, 'sw-1');
+  const v2 = await pending(W, 'sw-v2');
+  const v1 = await pending(W, 'sw-v1');
+  await downgradeToV1(W, v1);
   await call(t, 'PUT', `${base}/model-policy`, { session: W.owner, payload: { allowPaidFallback: true } });
   assert.equal((await call(t, 'PATCH', `${base}/agents/${W.agentId}`, { session: W.owner, payload: { modelId: PAID_MODEL } })).statusCode, 200);
   await call(t, 'PUT', `${base}/model-policy`, { session: W.owner, payload: { allowPaidFallback: false } });
-  await approveAndExpectBlocked(W, task, /model_not_allowed: .*paid fallback is disabled/);
+  const refused = await call(t, 'POST', `${base}/approvals/${v2.approvalId}/decision`, { session: W.owner, payload: { decision: 'approve' } });
+  assert.equal(refused.statusCode, 409); assert.equal(refused.json().error.code, 'approval_payload_mismatch');
+  assert.equal(dispatchedFor(v2.id).length, 0);
+  await approveAndExpectBlocked(W, v1, /model_not_allowed: .*paid fallback is disabled/);
 });
 
 test('paid fallback turned OFF while a paid-model task waits for approval: blocked', async () => {
@@ -118,13 +135,18 @@ test('agent disabled while waiting: blocked', async () => {
   await approveAndExpectBlocked(W, task, /agent is disabled/);
 });
 
-test("agent moved to a connection for a different provider than the model's: blocked", async () => {
+test("agent moved to a connection for a different provider than the model's: refused at decision (v2), blocked at dispatch (v1)", async () => {
   const W = await seedWorkspace(t, 'gate-provider', true);
   const base = `/api/v1/tenants/${W.tenantId}`;
-  const task = await pending(W, 'pv-1');
+  const v2 = await pending(W, 'pv-v2');
+  const v1 = await pending(W, 'pv-v1');
+  await downgradeToV1(W, v1);
   const gemini = (await call(t, 'POST', `${base}/providers`, { session: W.owner, payload: { provider: 'gemini', label: 'g', credential: 'gemini-test-SECRET' } })).json().data;
   assert.equal((await call(t, 'PATCH', `${base}/agents/${W.agentId}`, { session: W.owner, payload: { providerConnectionId: gemini.id } })).statusCode, 200);
-  await approveAndExpectBlocked(W, task, /registered for openrouter but the agent's connection is gemini/);
+  const refused = await call(t, 'POST', `${base}/approvals/${v2.approvalId}/decision`, { session: W.owner, payload: { decision: 'approve' } });
+  assert.equal(refused.statusCode, 409);
+  assert.equal(dispatchedFor(v2.id).length, 0);
+  await approveAndExpectBlocked(W, v1, /registered for openrouter but the agent's connection is gemini/);
 });
 
 test('run() under another tenant cannot claim, dispatch or alter the task', async () => {
@@ -135,6 +157,7 @@ test('run() under another tenant cannot claim, dispatch or alter the task', asyn
   try {
     await client.query('BEGIN');
     await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+    await client.query(`UPDATE approvals SET status = 'approved', decided_by = $2, decided_at = now() WHERE id = $1`, [task.approvalId, A.ownerId]);
     await client.query(`UPDATE tasks SET status = 'queued' WHERE id = $1`, [task.id]);
     await client.query('COMMIT');
   } finally { client.release(); }

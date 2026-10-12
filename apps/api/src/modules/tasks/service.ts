@@ -33,9 +33,37 @@ export interface SubmitInput {
   agentId: string; websiteId?: string; type: TaskType; input: Record<string, unknown>;
 }
 
-/** The exact bytes an approval is bound to: changing any of these invalidates a pending approval. */
+/** The task fields every approval digest version binds. */
 export function boundPayload(task: Pick<TaskRow, 'tenant_id' | 'agent_id' | 'type' | 'input' | 'website_id'>) {
   return { tenantId: task.tenant_id, agentId: task.agent_id, type: task.type, input: task.input, websiteId: task.website_id };
+}
+
+export const CURRENT_APPROVAL_DIGEST_VERSION = 2;
+
+export interface AgentSnapshot {
+  model_id: string;
+  provider_connection_id: string;
+  config: Record<string, unknown>;
+}
+
+/**
+ * Approval digest by stored format version:
+ *  v1 (legacy): the task payload only.
+ *  v2: the task payload plus the agent's model, provider connection and config,
+ *      so a material agent edit after the request invalidates the approval.
+ *      Cosmetic agent fields (name, description) are deliberately not bound.
+ * Returns null (never matches) for an unknown version or a missing agent.
+ */
+export function approvalDigest(version: number, task: Pick<TaskRow, 'tenant_id' | 'agent_id' | 'type' | 'input' | 'website_id'>, agent: AgentSnapshot | null): string | null {
+  if (version === 1) return payloadDigest(boundPayload(task));
+  if (version === 2 && agent) {
+    return payloadDigest({
+      v: 2,
+      ...boundPayload(task),
+      agent: { modelId: agent.model_id, providerConnectionId: agent.provider_connection_id, config: agent.config },
+    });
+  }
+  return null;
 }
 
 export class TaskService {
@@ -81,8 +109,8 @@ export class TaskService {
       if (agent.requires_approval) {
         const expiresAt = new Date(Date.now() + APPROVAL_TTL_MINUTES * 60_000);
         const approval = await client.query<{ id: string }>(
-          `INSERT INTO approvals (tenant_id, task_id, action, payload_digest, expires_at) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-          [input.tenantId, row.id, APPROVAL_ACTION, payloadDigest(boundPayload(row)), expiresAt],
+          `INSERT INTO approvals (tenant_id, task_id, action, payload_digest, digest_version, expires_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [input.tenantId, row.id, APPROVAL_ACTION, approvalDigest(CURRENT_APPROVAL_DIGEST_VERSION, row, agent), CURRENT_APPROVAL_DIGEST_VERSION, expiresAt],
         );
         const upd = await client.query<TaskRow>('UPDATE tasks SET approval_id = $2, updated_at = now() WHERE id = $1 RETURNING *', [row.id, approval.rows[0]!.id]);
         row = upd.rows[0]!;
@@ -148,6 +176,22 @@ export class TaskService {
         return block('provider connection not found in this tenant', { agentId: agent.id, providerConnectionId: agent.provider_connection_id });
       }
       if (agent.status !== 'active') return block('agent is disabled', { agentId: agent.id });
+
+      if (row.approval_id) {
+        // Re-verify the approval against exactly what is about to be dispatched,
+        // so nothing that changed after the decision can ride on it.
+        const ap = await client.query<{ status: string; payload_digest: string; digest_version: number }>(
+          'SELECT status, payload_digest, digest_version FROM approvals WHERE id = $1 AND tenant_id = $2 AND task_id = $3',
+          [row.approval_id, tenantId, row.id],
+        );
+        const approval = ap.rows[0];
+        if (!approval || approval.status !== 'approved') {
+          return block('task has not been approved', { approvalId: row.approval_id, approvalStatus: approval?.status ?? null });
+        }
+        if (approvalDigest(approval.digest_version, row, agent) !== approval.payload_digest) {
+          return block('task payload or agent configuration changed after approval', { approvalId: row.approval_id, digestVersion: approval.digest_version });
+        }
+      }
 
       let model;
       try {

@@ -12,6 +12,7 @@
     "migrate": "node --env-file=.env --import tsx src/db/cli.ts up",
     "migrate:rollback": "node --env-file=.env --import tsx src/db/cli.ts down",
     "bootstrap:owner": "node --env-file=.env --import tsx src/auth/bootstrapCli.ts",
+    "models:sync": "node --env-file=.env --import tsx src/policy/pricingSyncCli.ts",
     "test": "node --env-file=.env.test --import tsx --test --test-concurrency=1 'test/integration/**/*.test.ts'",
     "lint": "tsc -p tsconfig.json --noEmit"
   },

@@ -47,6 +47,9 @@ export type ErrorCode =
   | 'approval_payload_mismatch'
   | 'approval_already_decided'
   | 'task_not_cancellable'
+  | 'already_member'
+  | 'last_owner'
+  | 'invitation_invalid'
   | 'rate_limited'
   | 'internal_error';
 
@@ -242,6 +245,8 @@ export interface Approval {
   taskId: UUID;
   action: string;
   payloadDigest: string;
+  /** 1 = legacy (task payload only); 2 = task payload + agent model/connection/config. See FRONTEND_HANDOFF.md. */
+  digestVersion: 1 | 2;
   status: ApprovalStatus;
   decidedBy: UUID | null;
   decidedAt: ISODateTime | null;
@@ -264,6 +269,58 @@ export interface AuditEvent {
   targetId: UUID;
   metadata: Record<string, unknown>;
   createdAt: ISODateTime;
+}
+
+export interface Member {
+  /** Membership id (use it in /members/{membershipId}). */
+  id: UUID;
+  tenantId: UUID;
+  userId: UUID;
+  email: string;
+  displayName: string;
+  role: Role;
+  createdAt: ISODateTime;
+}
+
+export interface UpdateMemberRequest {
+  role: Role;
+}
+
+/** 'expired' is computed: a pending invitation past expiresAt. */
+export type InvitationStatus = 'pending' | 'accepted' | 'revoked' | 'expired';
+
+export interface Invitation {
+  id: UUID;
+  tenantId: UUID;
+  email: string;
+  role: Role;
+  status: InvitationStatus;
+  invitedBy: UUID;
+  expiresAt: ISODateTime;
+  acceptedAt: ISODateTime | null;
+  createdAt: ISODateTime;
+}
+
+export interface CreateInvitationRequest {
+  email: string;
+  role: Role;
+}
+
+export interface CreateInvitationResponse {
+  invitation: Invitation;
+  /**
+   * Returned exactly once, here. The server stores only its hash and cannot
+   * show it again. No email is sent: the inviter delivers the link
+   * out-of-band. Treat it as a secret.
+   */
+  inviteToken: string;
+}
+
+export interface AcceptInvitationRequest {
+  token: string;
+  /** Required only when the invited email has no account yet (min 12 chars). */
+  password?: string;
+  displayName?: string;
 }
 
 export interface ReadinessCheck {

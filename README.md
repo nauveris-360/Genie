@@ -38,7 +38,7 @@ npm run dev                                # http://localhost:4000/api/v1/health
 cp apps/api/.env.test.example apps/api/.env.test   # point at a disposable DB
 npm test
 ```
-67 integration tests run serially against a real PostgreSQL 16 database using a
+89 integration tests run serially against a real PostgreSQL 16 database using a
 mock agent adapter; details and coverage list in `docs/RUNBOOK.md`.
 
 ## Guarantees implemented and tested
@@ -61,4 +61,11 @@ mock agent adapter; details and coverage list in `docs/RUNBOOK.md`.
 * Free-first model policy enforced server-side for every call kind; paid
   fallback off by default, never auto-enabled; seeded, unknown and stale
   pricing never treated as free (fail closed until a trusted verification);
-  no invented quota balances.
+  no invented quota balances. Pricing is verified from OpenRouter's free public
+  model list for an owner-reviewed allowlist (`apps/api/config/approved-models.json`)
+  and re-checked immediately before every model call.
+* Approvals bind the task payload and (digest v2) the agent's model, connection
+  and config; legacy v1 approvals stay valid.
+* Members and one-time invitations with an owner/admin role hierarchy and a
+  guaranteed last owner.
+* Backup and restore-rehearsal scripts (`infra/scripts/`), rehearsed locally.

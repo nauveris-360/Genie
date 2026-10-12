@@ -4,7 +4,7 @@ import { getPool, closePool } from '../../src/db/index.js';
 import { appliedMigrations, migrateDown, migrateUp } from '../../src/db/migrate.js';
 import { loadConfig } from '../../src/config.js';
 
-const ALL = ['001_core', '002_tenant_scoped', '003_seed_models', '004_rls_nullif', '005_rate_limit_and_verification'];
+const ALL = ['001_core', '002_tenant_scoped', '003_seed_models', '004_rls_nullif', '005_rate_limit_and_verification', '006_approval_digest_v2', '007_invitations'];
 
 after(async () => { await migrateUp(getPool()); await closePool(); });
 
@@ -21,7 +21,10 @@ test('migrations apply from an empty database, are idempotent, roll back one ste
   const first = await migrateUp(pool);
   assert.deepEqual(first.applied, ALL);
   const tables = (await pool.query(`SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`)).rows.map((r) => r.tablename);
-  assert.deepEqual(tables, ['agents', 'approvals', 'audit_events', 'memberships', 'model_policies', 'models', 'provider_connections', 'rate_limit_buckets', 'schema_migrations', 'sessions', 'tasks', 'tenants', 'users', 'websites']);
+  assert.deepEqual(tables, ['agents', 'approvals', 'audit_events', 'invitations', 'memberships', 'model_policies', 'models', 'provider_connections', 'rate_limit_buckets', 'schema_migrations', 'sessions', 'tasks', 'tenants', 'users', 'websites']);
+  // 006: approvals created before the migration are digest v1 (column default), never silently v2
+  const dv = (await pool.query(`SELECT column_default FROM information_schema.columns WHERE table_name = 'approvals' AND column_name = 'digest_version'`)).rows[0].column_default;
+  assert.equal(dv, '1');
   // 005: every seeded registry row is untrusted and carries no fake verification timestamp
   const seeded = (await pool.query(`SELECT verification_source, last_verified_at FROM models`)).rows;
   assert.ok(seeded.every((r) => r.verification_source === 'seed' && r.last_verified_at === null));
@@ -38,6 +41,10 @@ test('migrations apply from an empty database, are idempotent, roll back one ste
   const second = await migrateUp(pool);
   assert.deepEqual(second.applied, [], 're-running is a no-op');
 
+  assert.equal((await migrateDown(pool)).rolledBack, '007_invitations');
+  assert.equal((await pool.query(`SELECT to_regclass('public.invitations') AS t`)).rows[0].t, null);
+  assert.equal((await migrateDown(pool)).rolledBack, '006_approval_digest_v2');
+  assert.equal((await pool.query(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'approvals' AND column_name = 'digest_version'`)).rows[0].n, 0);
   assert.equal((await migrateDown(pool)).rolledBack, '005_rate_limit_and_verification');
   const cols = (await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'models' AND column_name = 'verification_source'`)).rowCount;
   assert.equal(cols, 0);
@@ -51,7 +58,7 @@ test('migrations apply from an empty database, are idempotent, roll back one ste
   assert.deepEqual(afterDown, ['memberships', 'schema_migrations', 'sessions', 'tenants', 'users']);
 
   const reup = await migrateUp(pool);
-  assert.deepEqual(reup.applied, ['002_tenant_scoped', '003_seed_models', '004_rls_nullif', '005_rate_limit_and_verification']);
+  assert.deepEqual(reup.applied, ['002_tenant_scoped', '003_seed_models', '004_rls_nullif', '005_rate_limit_and_verification', '006_approval_digest_v2', '007_invitations']);
   assert.deepEqual(await appliedMigrations(pool), ALL);
 });
 

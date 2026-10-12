@@ -23,7 +23,9 @@ export type Permission =
   | 'task:cancel'
   | 'approval:read'
   | 'approval:decide'
-  | 'auditEvent:read';
+  | 'auditEvent:read'
+  | 'member:read'
+  | 'member:manage';
 
 const ALL_ROLES: Role[] = ['owner', 'admin', 'operator', 'viewer'];
 const WRITE_ROLES: Role[] = ['owner', 'admin', 'operator'];
@@ -52,10 +54,30 @@ export const PERMISSION_ROLES: Record<Permission, Role[]> = {
   'approval:read': ALL_ROLES,
   'approval:decide': ADMIN_ROLES,
   'auditEvent:read': ALL_ROLES,
+  'member:read': ALL_ROLES,
+  'member:manage': ADMIN_ROLES,
 };
 
 export function roleHasPermission(role: Role, permission: Permission): boolean {
   return PERMISSION_ROLES[permission].includes(role);
+}
+
+/**
+ * Which roles an actor holding member:manage may assign or act upon. Owners
+ * may manage every role. Admins may only invite, change or remove operators
+ * and viewers, and may only assign those roles, so an admin can never create,
+ * promote, demote or remove an owner or another admin. The server also
+ * refuses any change that would leave a tenant without an owner.
+ */
+export const MANAGEABLE_ROLES: Record<Role, Role[]> = {
+  owner: ['owner', 'admin', 'operator', 'viewer'],
+  admin: ['operator', 'viewer'],
+  operator: [],
+  viewer: [],
+};
+
+export function canManageRole(actor: Role, target: Role): boolean {
+  return MANAGEABLE_ROLES[actor].includes(target);
 }
 
 /** owner is a superset of admin for every documented permission; kept explicit above rather than derived, so the table is the literal source of truth. */

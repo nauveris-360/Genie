@@ -54,6 +54,10 @@ tags:
     description: Immutable approval decisions bound to tenant, action, payload digest and expiry.
   - name: AuditEvents
     description: Append-only, redacted audit trail per tenant.
+  - name: Members
+    description: Tenant membership and roles. Owners manage everyone; admins manage operators and viewers; a tenant always keeps an owner.
+  - name: Invitations
+    description: One-time, hashed, 7-day invitation links delivered out-of-band (no email integration).
   - name: Health
     description: Liveness and honest dependency readiness (no synthetic success).
 
@@ -821,6 +825,284 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
 
+  /tenants/{tenantId}/members:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [Members]
+      operationId: listMembers
+      summary: List members of a tenant
+      description: Any member (permission member:read). Newest first.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Members of the tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberListResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/TenantNotFound'
+
+  /tenants/{tenantId}/members/{membershipId}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/MembershipId'
+    patch:
+      tags: [Members]
+      operationId: updateMember
+      security:
+        - cookieAuth: []
+          csrfHeader: []
+      summary: Change a member's role
+      description: |
+        Requires member:manage (owner or admin). Owners may assign any role to anyone.
+        Admins may only change operators and viewers, and only to operator or viewer.
+        The actor's role is re-read inside the locked transaction. A change that would leave
+        the tenant without an owner is refused with 409 last_owner. Takes effect on the
+        member's next request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateMemberRequest' }
+            examples:
+              default:
+                value: { role: "operator" }
+      responses:
+        '200':
+          description: Updated member.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Member' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Member not found in this tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: The change would leave the tenant without an owner.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+              examples:
+                lastOwner:
+                  value: { error: { code: "last_owner", message: "A tenant must keep at least one owner.", requestId: "13131313-1313-4131-8131-131313131313" } }
+    delete:
+      tags: [Members]
+      operationId: removeMember
+      security:
+        - cookieAuth: []
+          csrfHeader: []
+      summary: Remove a member from the tenant
+      description: Same authorization rules as updateMember. The removed user loses access on their next request; their account and other memberships are unaffected.
+      responses:
+        '200':
+          description: Member removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [success]
+                    properties:
+                      success: { type: boolean, const: true }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Member not found in this tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Removing this member would leave the tenant without an owner.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /tenants/{tenantId}/invitations:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [Invitations]
+      operationId: listInvitations
+      summary: List invitations (any status)
+      description: Requires member:manage. Tokens are never included.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Invitations, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InvitationListResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Invitations]
+      operationId: createInvitation
+      security:
+        - cookieAuth: []
+          csrfHeader: []
+      summary: Invite someone by email
+      description: |
+        Requires member:manage, and the actor must be allowed to assign the requested role
+        (admins: operator or viewer only). Returns the invitation and its one-time token,
+        exactly once; only a hash is stored. No email is sent: deliver the link out-of-band.
+        Any earlier pending invitation for the same email in this tenant is revoked. The link
+        expires after 7 days.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateInvitationRequest' }
+            examples:
+              default:
+                value: { email: "new.person@example.com", role: "operator" }
+      responses:
+        '201':
+          description: Invitation created. inviteToken is shown only in this response.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/CreateInvitationResponse' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: That email already belongs to a member of this tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+              examples:
+                alreadyMember:
+                  value: { error: { code: "already_member", message: "This person is already a member of this tenant.", requestId: "14141414-1414-4141-8141-141414141414" } }
+
+  /tenants/{tenantId}/invitations/{invitationId}/revoke:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/InvitationId'
+    post:
+      tags: [Invitations]
+      operationId: revokeInvitation
+      security:
+        - cookieAuth: []
+          csrfHeader: []
+      summary: Revoke a pending invitation
+      description: Requires member:manage and permission to manage the invitation's role. Idempotent; an already accepted invitation is returned unchanged (remove the member instead).
+      responses:
+        '200':
+          description: Invitation after revocation.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Invitation' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Invitation not found in this tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /invitations/accept:
+    post:
+      tags: [Invitations]
+      operationId: acceptInvitation
+      summary: Accept an invitation
+      description: |
+        Public (no session required) but Origin-checked like login, and rate limited per
+        client address (20 failed attempts per 15 minutes). An unknown, used, revoked or
+        expired token always gets the same 400 invitation_invalid.
+        - Invited email has **no account**: send `password` (12+ chars, optional
+          `displayName`); the account is created, joined with the invited role and signed in
+          (session + CSRF cookies are set). Must not be signed in as someone else (403).
+        - Invited email **already has an account**: the caller must be signed in as exactly
+          that user and send the X-CSRF-Token header; `password` is ignored. Not signed in:
+          401. Signed in as a different user: 403.
+        A token can be accepted at most once, even under concurrent requests.
+      security:
+        - {}
+        - cookieAuth: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AcceptInvitationRequest' }
+            examples:
+              newAccount:
+                value: { token: "EXAMPLEtokenEXAMPLEtokenEXAMPLEtokenEXAMPL", password: "a-long-passphrase", displayName: "New Person" }
+              existingAccount:
+                value: { token: "EXAMPLEtokenEXAMPLEtokenEXAMPLEtokenEXAMPL" }
+      responses:
+        '200':
+          description: Joined. Body is the caller's AuthMe including the new membership.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AuthMe' }
+        '400':
+          description: Validation error, or invitation_invalid (unknown, used, revoked or expired token).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+              examples:
+                invalid:
+                  value: { error: { code: "invitation_invalid", message: "This invitation link is invalid or has expired.", requestId: "15151515-1515-4151-8151-151515151515" } }
+        '401':
+          description: The invited email has an account; sign in as it, then accept.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '403':
+          description: Signed in as a different account, missing/invalid CSRF header, or untrusted Origin.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Already a member of this tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
   /health/live:
     get:
       tags: [Health]
@@ -911,6 +1193,17 @@ components:
       schema: { type: string, format: uuid }
     ApprovalId:
       name: approvalId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MembershipId:
+      name: membershipId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+      description: Membership id (Member.id), not the user id.
+    InvitationId:
+      name: invitationId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1304,13 +1597,17 @@ components:
 
     Approval:
       type: object
-      required: [id, tenantId, taskId, action, payloadDigest, status, expiresAt, createdAt]
+      required: [id, tenantId, taskId, action, payloadDigest, digestVersion, status, expiresAt, createdAt]
       properties:
         id: { type: string, format: uuid }
         tenantId: { type: string, format: uuid }
         taskId: { type: string, format: uuid }
         action: { type: string }
         payloadDigest: { type: string, description: "SHA-256 hex digest of the canonicalized bound action payload at creation time." }
+        digestVersion:
+          type: integer
+          enum: [1, 2]
+          description: "Digest format of payloadDigest. 1 (legacy, approvals created before migration 006) binds the task payload only; 2 also binds the agent's model, provider connection and config at request time. See docs/FRONTEND_HANDOFF.md."
         status: { $ref: '#/components/schemas/ApprovalStatus' }
         decidedBy: { type: [string, "null"], format: uuid }
         decidedAt: { type: [string, "null"], format: date-time }
@@ -1355,6 +1652,85 @@ components:
           type: array
           items: { $ref: '#/components/schemas/AuditEvent' }
         page: { $ref: '#/components/schemas/PageInfo' }
+
+    Member:
+      type: object
+      required: [id, tenantId, userId, email, displayName, role, createdAt]
+      properties:
+        id: { type: string, format: uuid, description: "Membership id." }
+        tenantId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        createdAt: { type: string, format: date-time }
+
+    MemberListResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Member' }
+        page: { $ref: '#/components/schemas/PageInfo' }
+
+    UpdateMemberRequest:
+      type: object
+      required: [role]
+      properties:
+        role: { $ref: '#/components/schemas/Role' }
+
+    InvitationStatus:
+      type: string
+      enum: [pending, accepted, revoked, expired]
+      description: "expired is computed: a pending invitation past expiresAt."
+
+    Invitation:
+      type: object
+      required: [id, tenantId, email, role, status, invitedBy, expiresAt, acceptedAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role: { $ref: '#/components/schemas/Role' }
+        status: { $ref: '#/components/schemas/InvitationStatus' }
+        invitedBy: { type: string, format: uuid }
+        expiresAt: { type: string, format: date-time }
+        acceptedAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    InvitationListResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Invitation' }
+        page: { $ref: '#/components/schemas/PageInfo' }
+
+    CreateInvitationRequest:
+      type: object
+      required: [email, role]
+      properties:
+        email: { type: string, format: email, maxLength: 320 }
+        role: { $ref: '#/components/schemas/Role' }
+
+    CreateInvitationResponse:
+      type: object
+      required: [invitation, inviteToken]
+      properties:
+        invitation: { $ref: '#/components/schemas/Invitation' }
+        inviteToken:
+          type: string
+          description: "One-time secret, returned only here (the server keeps a hash). Build the accept link from it and deliver it out-of-band; no email is sent."
+
+    AcceptInvitationRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string, pattern: "^[A-Za-z0-9_-]{20,200}$" }
+        password: { type: string, minLength: 12, maxLength: 512, description: "Required only when the invited email has no account yet." }
+        displayName: { type: string, minLength: 1, maxLength: 200 }
 
     ReadinessCheck:
       type: object

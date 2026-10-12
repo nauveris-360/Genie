@@ -6,7 +6,7 @@ For AI Studio (apps/web) and Codex reconciliation. Source of truth is
 example payloads for every endpoint are in `packages/contracts/fixtures/*.json`.
 If this page and the YAML ever disagree, the YAML wins — tell us.
 
-Status: backend implemented and integration-tested (67 tests) against
+Status: backend implemented and integration-tested (89 tests) against
 PostgreSQL 16 with a **mock** agent adapter. Hermes is **not** integrated
 (readiness reports it `unavailable`). There is **no pricing-verification job
 yet, so in a real deployment every model is refused** (`409
@@ -31,6 +31,20 @@ billing are not implemented. Nothing is deployed.
   `security: [{ cookieAuth, csrfHeader }]` (behaviour unchanged).
 * JSON bodies containing a `"__proto__"` key or a `"constructor": {"prototype": …}`
   member anywhere are rejected with `400 validation_error`, never stripped.
+
+### New in this round (screens to build)
+* **Members and invitations** (§ "Members and invitations"): six endpoints,
+  `Member` / `Invitation` entities, permissions `member:read` / `member:manage`,
+  helper `canManageRole(actorRole, targetRole)` in `@genie/contracts`, error codes
+  `already_member`, `last_owner`, `invitation_invalid`, and a public
+  accept-invitation page.
+* **`Approval.digestVersion: 1 | 2`** (new, required). New approvals are v2 and
+  also bind the agent's model, provider connection and config: editing those
+  after a task was submitted makes the approval fail with `409
+  approval_payload_mismatch`. Name and description edits do not.
+* **Models become usable** once an owner approves a model in
+  `apps/api/config/approved-models.json` and the server-side pricing sync runs.
+  Until then every model still shows `allowed: false`.
 
 ## Transport conventions
 
@@ -104,11 +118,18 @@ role → `403 forbidden`. Any signed-in user may `POST /tenants` and becomes its
 | approval:read | ✓ | ✓ | ✓ | ✓ | `GET …/approvals` |
 | approval:decide | ✓ | ✓ | – | – | `POST …/approvals/{id}/decision` |
 | auditEvent:read | ✓ | ✓ | ✓ | ✓ | `GET …/audit-events` |
+| member:read | ✓ | ✓ | ✓ | ✓ | `GET …/members` |
+| member:manage | ✓ | ✓\* | – | – | `PATCH`/`DELETE …/members/{membershipId}`, `GET`/`POST …/invitations`, `POST …/invitations/{id}/revoke` |
+
+\* Admins may only invite, change or remove **operators and viewers**, and only
+assign those two roles (`MANAGEABLE_ROLES` / `canManageRole`). Owners may do
+anything, except that no change may leave the tenant without an owner.
+`POST /invitations/accept` is public (see below).
 
 `…` = `/tenants/{tenantId}`. Import `PERMISSION_ROLES` / `roleHasPermission`
 from `@genie/contracts` to drive UI affordances; the backend re-checks regardless.
-There is **no** membership-management endpoint in v1 (owner bootstrap is a
-private CLI); show members as read-only from `/auth/me` for now.
+The very first owner is still created by the private bootstrap CLI. Everyone
+else joins through invitations.
 
 ## Entities (exact response fields)
 
@@ -138,8 +159,13 @@ Task        { id, tenantId, websiteId: uuid|null, agentId,
               input: object, result: object|null, error: string|null, idempotencyKey,
               approvalId: uuid|null, createdBy, createdAt, updatedAt }
 Approval    { id, tenantId, taskId, action: 'task.execute', payloadDigest: sha256hex,
+              digestVersion: 1|2,
               status: 'pending'|'approved'|'rejected'|'expired', decidedBy: uuid|null,
               decidedAt: string|null, reason: string|null, expiresAt, createdAt }
+Member      { id /* membershipId */, tenantId, userId, email, displayName, role, createdAt }
+Invitation  { id, tenantId, email, role, status: 'pending'|'accepted'|'revoked'|'expired',
+              invitedBy: uuid, expiresAt, acceptedAt: string|null, createdAt }   // never the token
+CreateInvitationResponse { invitation: Invitation, inviteToken: string }      // token shown ONCE
 AuditEvent  { id, tenantId, actorUserId: uuid|null, action, targetType, targetId, metadata: object, createdAt }
 Readiness   { data: { status:'ok'|'degraded', checks: { database: {status, detail?}, agentAdapter: {status, detail?} } } }
 ```
@@ -164,6 +190,11 @@ its prices (they are `null`).
 | `POST …/tasks` | header **`Idempotency-Key`** (required, 1–200 chars; generate a UUID per user intent and reuse it on retry) + `{ agentId, type, input: object, websiteId? }` |
 | `POST …/tasks/{id}/cancel` | none |
 | `POST …/approvals/{id}/decision` | `{ decision: 'approve'\|'reject', reason? }` |
+| `PATCH …/members/{membershipId}` | `{ role }` |
+| `DELETE …/members/{membershipId}` | none → `{ data: { success: true } }` |
+| `POST …/invitations` | `{ email, role }` → 201 `{ invitation, inviteToken }` |
+| `POST …/invitations/{id}/revoke` | none → the `Invitation` (idempotent) |
+| `POST /invitations/accept` | `{ token, password?, displayName? }` → 200 `AuthMe` (see flows below) |
 
 ## Error codes to handle
 
@@ -171,8 +202,45 @@ its prices (they are `null`).
 `forbidden`(403, also untrusted Origin) · `csrf_mismatch`(403) · `not_found`(404) ·
 `idempotency_key_conflict`(409) · `model_not_allowed`(409) · `approval_expired`(409) ·
 `approval_payload_mismatch`(409) · `approval_already_decided`(409) ·
-`task_not_cancellable`(409) · `rate_limited`(429, with `retryAfterSeconds`) ·
+`task_not_cancellable`(409) · `already_member`(409) · `last_owner`(409) ·
+`invitation_invalid`(400) · `rate_limited`(429, with `retryAfterSeconds`) ·
 `internal_error`(500). Always surface `requestId` in error UI.
+
+## Members and invitations
+
+**Members page** (`GET …/members`, any role): list `email`, `displayName`,
+`role`. Show role controls only where `canManageRole(myRole, member.role)` is
+true, and in the role picker offer only roles where `canManageRole(myRole, r)`
+is true. Handle `409 last_owner` with "A workspace must keep at least one
+owner". Removing a member takes effect on their next request.
+
+**Invite** (`POST …/invitations`, owners and admins): the response's
+`inviteToken` appears **only once**. Build the link immediately, for example
+`https://<app-origin>/accept-invite#token=<inviteToken>`. A URL fragment keeps
+the token out of server logs and `Referer` headers. Show it with a copy button
+and a clear warning: "Anyone with this link can join as <role>. It expires on
+<expiresAt>. Send it directly to the person." **No email is sent.** The
+invitation list (`GET …/invitations`) never includes tokens. A lost link
+cannot be shown again: revoke it and invite again (a new invite for the same
+email automatically revokes the previous one).
+
+**Accept-invite page** (public route): read the token from the fragment, then:
+1. If the user is **signed in**, call `POST /invitations/accept { token }`
+   with the usual `X-CSRF-Token` header.
+   * 200 → show the new workspace (the body is the updated `AuthMe`).
+   * 403 `forbidden` → "This invitation is for a different account. Sign out
+     and open the link again."
+2. If the user is **not signed in**, show a form (display name and password, 12+
+   characters) and call `POST /invitations/accept { token, password, displayName }`.
+   * 200 → the account was created, cookies are set, and the user is signed in.
+   * 401 `unauthorized` → the email already has an account: "Sign in to accept",
+     then retry step 1 after login with the same token.
+3. 400 `invitation_invalid` → "This invitation link is invalid or has expired.
+   Ask for a new one." The same message covers unknown, used, revoked and
+   expired links, so don't try to tell them apart.
+4. 409 `already_member` → open the workspace. 429 → countdown from `Retry-After`.
+
+The accept call is Origin-checked like login and rate limited per address.
 
 ## Task & approval semantics
 
@@ -186,8 +254,12 @@ its prices (they are `null`).
    (same `id`); same key + different body → `409 idempotency_key_conflict`.
 3. If `agent.requiresApproval` is `true` (default), the task is persisted as
    `awaiting_approval` with `approvalId` set and a `pending` Approval bound to a
-   SHA-256 digest of `{tenantId, agentId, type, input, websiteId}` and a
-   60-minute `expiresAt`. Nothing reaches the model before approval.
+   SHA-256 digest (v2: the task payload plus the agent's model, provider
+   connection and config; see below) and a 60-minute `expiresAt`. Nothing
+   reaches the model before approval. If someone edits the agent's model,
+   connection or config before the decision, approving returns `409
+   approval_payload_mismatch`: show "The agent changed after this request;
+   submit the task again".
 4. If `requiresApproval` is `false`, the task runs synchronously through the
    adapter inside the same request; the 202 body already shows the final status
    (`succeeded`/`failed`). With Hermes not integrated, a production-configured
@@ -214,15 +286,22 @@ its prices (they are `null`).
 8. Every action above writes an AuditEvent (`task.submitted`, `approval.requested`,
    `approval.decided`, `approval.expired`, `task.dispatch_blocked`,
    `task.succeeded|failed|cancelled`, `provider.credential_saved`,
-   `model_policy.updated`, `website.*`, `agent.*`, `tenant.created`). Metadata is
-   redacted server-side.
+   `model_policy.updated`, `website.*`, `agent.*`, `tenant.created`,
+   `member.role_changed`, `member.removed`, `member.joined`, `invitation.created`,
+   `invitation.revoked`, `invitation.accepted`). Metadata is redacted server-side.
 
-### Approval digest (`payloadDigest`) — canonical form v1
-You should not need to compute it (the server binds and checks it); if you do,
-match exactly:
+### Approval digest (`payloadDigest`) — versions 1 and 2
+You should not need to compute it (the server binds and checks it). If you do,
+pick the object by `approval.digestVersion`:
 
-1. Object: `{ tenantId, agentId, type, input, websiteId }` from the stored task
-   (`websiteId` is `null` when absent, never omitted). Use `input` as returned by
+1. Object:
+   * **v1** (approvals created before this release):
+     `{ tenantId, agentId, type, input, websiteId }` from the stored task.
+   * **v2** (all new approvals): the v1 fields plus `v: 2` and
+     `agent: { modelId, providerConnectionId, config }`, with the agent's values
+     **at the time the task was submitted**.
+
+   `websiteId` is `null` when absent, never omitted. Use `input` as returned by
    `GET …/tasks/{id}`.
 2. Recursively rebuild every object with its own keys inserted in
    `Object.keys(o).sort()` order (arrays keep their order), creating keys with
@@ -241,6 +320,10 @@ numerically, then every other key (including `"-1"`, `"01"`, `"1.5"`,
 
 {"agentId":"77777777-7777-4777-8777-777777777771","input":{"9":"nine","10":"ten","a":1,"b":[{"1":"y","2":"x"}],"prompt":"p"},"tenantId":"44444444-4444-4444-8444-444444444444","type":"chat","websiteId":null}
 → fc6a6b8127eff2f4542fd0ecf38298b170b28aef81fa5e95d031c714a31065e3
+
+v2:
+{"agent":{"config":{"tone":"formal"},"modelId":"openrouter/example-model:free","providerConnectionId":"66666666-6666-4666-8666-666666666661"},"agentId":"77777777-7777-4777-8777-777777777771","input":{"options":{"a":1,"b":2},"prompt":"Post this reply to the live ticket."},"tenantId":"44444444-4444-4444-8444-444444444444","type":"chat","v":2,"websiteId":null}
+→ 11fc72f9537a257e3ab4477ecf289e62b6bc4c561e3c2fc39db3d72d3096e25f
 ```
 
 ## Free-first policy (what the UI should expect)

@@ -1,0 +1,48 @@
+{
+  "members_list_response": {
+    "data": [
+      {
+        "id": "33333333-3333-4333-8333-333333333334",
+        "tenantId": "44444444-4444-4444-8444-444444444444",
+        "userId": "22222222-2222-4222-8222-222222222223",
+        "email": "operator@example.com",
+        "displayName": "Operator",
+        "role": "operator",
+        "createdAt": "2026-10-06T00:00:00.000Z"
+      },
+      {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "tenantId": "44444444-4444-4444-8444-444444444444",
+        "userId": "22222222-2222-4222-8222-222222222222",
+        "email": "owner@example.com",
+        "displayName": "Owner",
+        "role": "owner",
+        "createdAt": "2026-10-01T00:00:00.000Z"
+      }
+    ],
+    "page": { "nextCursor": null }
+  },
+  "update_member_request": { "role": "viewer" },
+  "create_invitation_request": { "email": "new.person@example.com", "role": "operator" },
+  "create_invitation_response": {
+    "data": {
+      "invitation": {
+        "id": "16161616-1616-4161-8161-161616161616",
+        "tenantId": "44444444-4444-4444-8444-444444444444",
+        "email": "new.person@example.com",
+        "role": "operator",
+        "status": "pending",
+        "invitedBy": "22222222-2222-4222-8222-222222222222",
+        "expiresAt": "2026-10-19T09:00:00.000Z",
+        "acceptedAt": null,
+        "createdAt": "2026-10-12T09:00:00.000Z"
+      },
+      "inviteToken": "EXAMPLEtokenEXAMPLEtokenEXAMPLEtokenEXAMPL"
+    }
+  },
+  "accept_new_account_request": { "token": "EXAMPLEtokenEXAMPLEtokenEXAMPLEtokenEXAMPL", "password": "a-long-passphrase", "displayName": "New Person" },
+  "accept_existing_account_request": { "token": "EXAMPLEtokenEXAMPLEtokenEXAMPLEtokenEXAMPL" },
+  "invitation_invalid_error": {
+    "error": { "code": "invitation_invalid", "message": "This invitation link is invalid or has expired.", "requestId": "15151515-1515-4151-8151-151515151515" }
+  }
+}

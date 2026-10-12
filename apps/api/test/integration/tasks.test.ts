@@ -108,5 +108,5 @@ test('restart preserves task history, approvals and audit trail', async () => {
   const auditAfter = (await call(t, 'GET', `/api/v1/tenants/${W.tenantId}/audit-events`, { session: cookie })).json().data.length;
   assert.equal(auditAfter, auditBefore);
   const { rows } = await getPool().query('SELECT id FROM schema_migrations ORDER BY id');
-  assert.deepEqual(rows.map((r) => r.id), ['001_core', '002_tenant_scoped', '003_seed_models', '004_rls_nullif', '005_rate_limit_and_verification']);
+  assert.deepEqual(rows.map((r) => r.id), ['001_core', '002_tenant_scoped', '003_seed_models', '004_rls_nullif', '005_rate_limit_and_verification', '006_approval_digest_v2', '007_invitations']);
 });

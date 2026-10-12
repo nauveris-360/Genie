@@ -13,6 +13,9 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   approval_payload_mismatch: 409,
   approval_already_decided: 409,
   task_not_cancellable: 409,
+  already_member: 409,
+  last_owner: 409,
+  invitation_invalid: 400,
   rate_limited: 429,
   internal_error: 500,
 };
@@ -51,6 +54,10 @@ export const errors = {
     new AppError('approval_already_decided', 'This approval was already approved or rejected and cannot be changed.'),
   taskNotCancellable: (status: string) =>
     new AppError('task_not_cancellable', `Task is already ${status} and cannot be cancelled.`),
+  alreadyMember: () => new AppError('already_member', 'This person is already a member of this tenant.'),
+  lastOwner: () => new AppError('last_owner', 'A tenant must keep at least one owner.'),
+  /** One message for unknown, used, revoked and expired tokens. */
+  invitationInvalid: () => new AppError('invitation_invalid', 'This invitation link is invalid or has expired.'),
   /** Deliberately identical for per-IP and per-account limits and for unknown accounts, so it reveals nothing. */
   loginRateLimited: (retryAfterSeconds: number) =>
     new AppError('rate_limited', 'Too many sign-in attempts. Try again later.', retryAfterSeconds),

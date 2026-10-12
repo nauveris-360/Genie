@@ -4,23 +4,22 @@ import type { Approval, ApprovalStatus } from '@genie/contracts';
 import { withTenant } from '../../db/index.js';
 import { errors } from '../../lib/errors.js';
 import { parseOrThrow } from '../../lib/validate.js';
-import { payloadDigest } from '../../lib/digest.js';
 import { toIso } from '../../lib/time.js';
 import { clampLimit, decodeCursor, pageOf } from '../../lib/pagination.js';
 import { requireUser } from '../../auth/plugin.js';
 import { requireTenantPermission } from '../../auth/rbac.js';
 import { recordAudit } from '../auditEvents/write.js';
-import { boundPayload, type TaskRow, type TaskService } from '../tasks/service.js';
+import { type AgentSnapshot, approvalDigest, type TaskRow, type TaskService } from '../tasks/service.js';
 
 const STATUSES = ['pending', 'approved', 'rejected', 'expired'] as const;
 const decideSchema = z.object({ decision: z.enum(['approve', 'reject']), reason: z.string().max(2000).optional() });
 
 interface Row {
-  id: string; tenant_id: string; task_id: string; action: string; payload_digest: string; status: ApprovalStatus;
+  id: string; tenant_id: string; task_id: string; action: string; payload_digest: string; digest_version: number; status: ApprovalStatus;
   decided_by: string | null; decided_at: Date | null; reason: string | null; expires_at: Date; created_at: Date;
 }
 const toApproval = (r: Row): Approval => ({
-  id: r.id, tenantId: r.tenant_id, taskId: r.task_id, action: r.action, payloadDigest: r.payload_digest, status: r.status,
+  id: r.id, tenantId: r.tenant_id, taskId: r.task_id, action: r.action, payloadDigest: r.payload_digest, digestVersion: r.digest_version as 1 | 2, status: r.status,
   decidedBy: r.decided_by, decidedAt: r.decided_at ? toIso(r.decided_at) : null, reason: r.reason,
   expiresAt: toIso(r.expires_at), createdAt: toIso(r.created_at),
 });
@@ -79,7 +78,11 @@ export async function approvalRoutes(app: FastifyInstance, opts: { tasks: TaskSe
       const taskRes = await client.query<TaskRow>('SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2 FOR UPDATE', [approval.task_id, ctx.tenantId]);
       const task = taskRes.rows[0];
       if (!task) throw errors.notFound('Task');
-      if (payloadDigest(boundPayload(task)) !== approval.payload_digest || task.status !== 'awaiting_approval') {
+      const agentRes = await client.query<AgentSnapshot>(
+        'SELECT model_id, provider_connection_id, config FROM agents WHERE id = $1 AND tenant_id = $2',
+        [task.agent_id, ctx.tenantId],
+      );
+      if (approvalDigest(approval.digest_version, task, agentRes.rows[0] ?? null) !== approval.payload_digest || task.status !== 'awaiting_approval') {
         throw errors.approvalPayloadMismatch();
       }
 

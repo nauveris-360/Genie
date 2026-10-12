@@ -53,8 +53,7 @@ history -d $(history 1 | awk '{print $1}')   # or clear the shell history line
 The script refuses to run if any user already exists. It creates the user
 (argon2id hash), the tenant, an `owner` membership, a model policy with paid
 fallback **off**, and a `tenant.bootstrapped` audit event, all in one transaction.
-Further members are added by owners through the application once a membership
-endpoint exists (not part of v1).
+Everyone else joins through an invitation (see "Members and invitations").
 
 ## Migrations
 * Files live in `apps/api/src/migrations/` as `NNN_name.up.sql` / `NNN_name.down.sql`
@@ -66,7 +65,9 @@ endpoint exists (not part of v1).
 * Current set: `001_core` (users, tenants, memberships, sessions),
   `002_tenant_scoped` (RLS-protected tenant tables, model registry, same-tenant
   trigger), `003_seed_models` (placeholder registry rows), `004_rls_nullif`
-  (policy hardening).
+  (policy hardening), `005_rate_limit_and_verification` (login buckets, pricing
+  provenance), `006_approval_digest_v2` (versioned approval digests),
+  `007_invitations` (one-time invitations).
 
 ### Rollback
 ```bash
@@ -74,7 +75,11 @@ npm run migrate:rollback   # rolls back exactly ONE migration (the latest)
 npm run migrate            # re-applies
 ```
 Rollback drops tables and their data for that step — take a database-aware
-backup first in any shared environment. Rolling back `005` drops the
+backup first in any shared environment. Rolling back `007` drops all
+invitations (outstanding links stop working; memberships are unaffected).
+Rolling back `006` drops `approvals.digest_version`, after which pending v2
+approvals no longer match and fail closed (409) rather than being accepted
+without their agent binding. Rolling back `005` drops the
 rate-limit buckets and the `verification_source` column (so trusted/seed
 provenance is lost; re-run verification after re-applying). Rolling back `003`
 removes the seeded registry rows (agents referencing them keep their
@@ -113,22 +118,122 @@ connection (tenant-scoped), refuses a disabled agent, re-runs the free-first
 policy for the agent's current model and the task's call kind, and requires the
 model's provider to match the connection. A failed check marks the task
 `failed` (`Blocked before dispatch: …`) with a `task.dispatch_blocked` audit
-event and no adapter call. Known limit: the approval digest binds the task
-payload, not the agent's configuration, so an agent edit that still passes
-policy (e.g. a different allowed free model or changed `config`) does not
-invalidate a pending approval. Binding agent configuration would be a new,
-versioned digest format.
+event and no adapter call. For a task with an approval, the gate also
+re-verifies that the approval is `approved` and that its digest still matches
+exactly what is about to be dispatched, closing the gap between decision and
+run.
+
+## Approval digests (versioned)
+`approvals.digest_version` records the format each approval was bound with.
+**v2** (all new approvals) binds the task payload plus the agent's `modelId`,
+`providerConnectionId` and `config` at request time, so any material agent edit
+after the request invalidates the approval (409 at decision, or blocked at
+dispatch). Name and description are cosmetic and not bound. **v1** (approvals
+created before migration 006) binds the task payload only and keeps validating
+exactly as before; for those, the dispatch gate's live policy/provider checks
+remain the protection against agent edits. Unknown versions never match. Both
+versions use the same canonical JSON; the recipe is in docs/FRONTEND_HANDOFF.md.
 
 ## Model pricing provenance (fail closed)
 Every row in `models` has `verification_source`: `seed` (placeholder, from
-migrations) or `trusted` (written only by `recordTrustedVerification`, the
-entry point for a future server-side pricing-verification job; no HTTP route
-can set it). The policy treats `seed` rows as `unknown` and never allows
+migrations) or `trusted` (written only by `recordTrustedVerification`; no HTTP
+route can set it). The policy treats `seed` rows as `unknown` and never allows
 them, not even with paid fallback. A `trusted` row older than
 `MODEL_PRICING_MAX_AGE_HOURS` (72) is `stale` and refused until re-verified.
-**Consequence today: with no verification job, no model is usable in a real
-deployment** — every task fails `409 model_not_allowed`. That is intended
-until a trusted verification exists; do not work around it by editing rows.
+Until the pricing sync below has run with at least one approved model, no model
+is usable and every task fails `409 model_not_allowed`. That is intended; do
+not work around it by editing rows.
+
+## Pricing sync (OpenRouter)
+`npm run models:sync` reads OpenRouter's free, public, unauthenticated model
+list (`GET https://openrouter.ai/api/v1/models`). It sends no API key and calls
+no model, so it costs nothing. It verifies **only** the models listed in
+`apps/api/config/approved-models.json`, the reviewed allowlist (shipped
+empty: approving a model is an owner decision, made by editing this file in a
+reviewed change):
+```json
+{ "openrouter": [ { "openRouterId": "<vendor>/<model>:free", "displayName": "Optional label" } ] }
+```
+Use OpenRouter's own id without a prefix; the registry stores it as
+`openrouter/<id>`, which is the `modelId` agents use. When a real Hermes
+adapter exists it must strip the `openrouter/` prefix before calling the
+provider. Classification fails closed:
+* `verified_free` only if `prompt` and `completion` are present and **every**
+  pricing dimension (request, image, web search, reasoning, cache, and any
+  dimension OpenRouter adds later) is exactly zero;
+* any non-zero dimension → `paid` (a `:free` suffix does not override it);
+* missing, malformed or negative values (OpenRouter uses `-1` for variable
+  pricing) → `unknown`;
+* an approved model missing from the feed → `unknown`;
+* a previously trusted model removed from the allowlist → `unknown`.
+Feed models that are not approved are never added. All writes happen in one
+transaction; a transport or format error writes nothing. Always run
+`npm run models:sync -- --dry-run` first and read the output.
+
+Schedule it every 6 hours (well inside the 72-hour freshness window), e.g. a
+cron job or a Coolify scheduled task running `node apps/api/dist/policy/pricingSyncCli.js`
+in the API image. If it stops running, verified models go `stale` after 72 hours
+and are refused: safe, but tasks stop working.
+
+**Not verified against the live feed yet.** This build environment's network
+policy blocks `openrouter.ai`, so the sync is tested only with fixtures modelled
+on OpenRouter's documented format. Do the first `--dry-run` on VPS 2 and check
+that the approved model shows `verified_free` with sensible reasons before
+relying on it. Gemini has no public machine-readable pricing, so Gemini models
+stay unverified (refused) until a separate verification source is chosen.
+
+## Members and invitations
+Any member can list members. Owners can change or remove anyone and invite to
+any role. Admins can only invite, change or remove operators and viewers, and
+only assign those roles. A tenant can never lose its last owner; every member
+change locks the tenant's owner rows first and re-reads the actor's role under
+that lock, so concurrent changes serialize. Removal takes effect on the
+removed user's next request.
+
+`POST /tenants/{id}/invitations` returns a one-time token **once** (only its
+SHA-256 is stored). The link is valid for 7 days, and a new invitation for the
+same email revokes the previous one. **No email is sent**: give the link to the
+person over a channel you trust; whoever holds it can claim the seat. If the
+email has no account, accepting creates one (password of 12+ characters) and
+signs it in. If it has an account, the person must sign in as exactly that
+account first; there is no second password-checking path. Acceptance is
+single-use under concurrency and rate limited per client address (20 failures
+per 15 minutes, same settings as login).
+
+## Backups and restore rehearsal
+Tenant tables use `FORCE ROW LEVEL SECURITY`, so **the application role cannot
+take a backup**: `pg_dump` as `genie` fails with "query would be affected by
+row-level security policy". This is the safe failure. Never use
+`--enable-row-security`, which silently dumps zero tenant rows. Create a
+dedicated read-only backup role once (run as a superuser; BYPASSRLS requires one):
+```sql
+CREATE ROLE genie_backup LOGIN BYPASSRLS PASSWORD '<from your secret store>';
+GRANT CONNECT ON DATABASE genie TO genie_backup;
+GRANT USAGE ON SCHEMA public TO genie_backup;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO genie_backup;
+ALTER DEFAULT PRIVILEGES FOR ROLE genie IN SCHEMA public GRANT SELECT ON TABLES TO genie_backup;
+```
+Then:
+```bash
+# Backup: custom-format dump + .sha256. Connection via libpq env vars, so no password on the command line.
+PGHOST=... PGUSER=genie_backup PGDATABASE=genie BACKUP_DIR=/var/backups/genie infra/scripts/backup-db.sh
+# Copy BOTH files off-server (e.g. restic or rclone to object storage). The script uploads nothing.
+
+# Rehearsal: verify checksum, restore into a NEW scratch DB, check migrations,
+# RLS 7/7, row counts (optionally vs the live DB), then drop the scratch DB.
+PGHOST=... PGUSER=<admin> COMPARE_DATABASE=genie infra/scripts/restore-rehearsal.sh /var/backups/genie/genie-<stamp>.dump
+```
+The admin role needs CREATEDB and must bypass RLS (a superuser is simplest),
+and the application roles must exist on the target server. Rehearse before any
+live customer data, and after every schema change. `CREDENTIAL_ENCRYPTION_KEY`
+is **not** in the database backup: keep it in the secret store, backed up
+separately. Without it, restored provider credentials cannot be decrypted (users
+re-enter them).
+
+Verified locally: backup through a least-privilege `genie_backup` role, then
+restore rehearsal with all checks passing and row counts equal to the source; a
+corrupted dump is rejected at the checksum step; no scratch database is left
+behind.
 
 ## Restart / persistence
 All state (sessions, tasks, approvals, audit history) is in PostgreSQL; the API
@@ -138,7 +243,7 @@ rebuilds them against the same database.
 
 ## Tests
 ```bash
-npm test     # 67 integration tests, serial, against DATABASE_URL in apps/api/.env.test
+npm test     # 89 integration tests, serial, against DATABASE_URL in apps/api/.env.test
 ```
 The suite migrates the test database from whatever state it is in, truncates
 data between files, and in `migrations.test.ts` drops and recreates the schema.
@@ -160,8 +265,14 @@ restart persistence, digest canonicalization (own `__proto__`/`constructor`/
 integer-like keys bound into approval and idempotency digests, byte-identical to
 the v1 format otherwise, pinned legacy hashes), and the pre-dispatch gate
 (model switched, fallback turned off, pricing stale/repriced/revoked, agent
-disabled, provider mismatch, wrong-tenant run — each with zero adapter calls).
-Test model rows are written through
+disabled, provider mismatch, wrong-tenant run — each with zero adapter calls),
+approval digest v2 (documented recipe, material vs cosmetic agent edits, legacy
+v1 compatibility, unknown versions, decision-to-run window), the OpenRouter
+pricing sync (classification incl. every malformed case, no credentials sent,
+allowlist only, demotion, dry run, all-or-nothing, end to end), and members and
+invitations (role rules, last owner under concurrency, immediate revocation,
+one-time hashed tokens, new and existing account flows, single use under
+concurrency, generic errors, rate limiting). Test model rows are written through
 `recordTrustedVerification`, standing in for the future verification job.
 
 ## Containers (review only — not deployed)
@@ -177,9 +288,10 @@ infrastructure requires owner approval and the deployment steps in BUILD-SPEC.md
   interface before `HermesAdapter` gets a real implementation.
 * **n8n execution, provider usage/quota, email, voice, SEO, publishing, billing**:
   not implemented; `Model.usage` is always `null`.
-* **Model pricing verification job**: not built. Seeded rows are placeholders
-  and fail closed, so no model is usable outside tests until a trusted job
-  calls `recordTrustedVerification` (needs owner decision on the pricing source;
-  it must not use paid API calls).
+* **Live pricing feed**: the OpenRouter sync is built and tested with fixtures
+  but has not been run against the real feed (network blocked here). The
+  allowlist ships empty. Gemini pricing has no verification source.
+* **Email**: invitations are not emailed; links are delivered out-of-band.
+* **MFA, breached-password screening, password reset**: not implemented.
 * **Rate limiting** covers `/auth/login` only. Other endpoints require a
   session and are not throttled yet.

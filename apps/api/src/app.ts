@@ -18,6 +18,8 @@ import { modelPolicyRoutes } from './modules/modelPolicy/routes.js';
 import { taskRoutes } from './modules/tasks/routes.js';
 import { approvalRoutes } from './modules/approvals/routes.js';
 import { auditEventRoutes } from './modules/auditEvents/routes.js';
+import { memberRoutes } from './modules/members/routes.js';
+import { invitationRoutes } from './modules/invitations/routes.js';
 
 export interface BuildOptions {
   adapter?: AgentAdapter;
@@ -77,6 +79,8 @@ export async function buildApp(options: BuildOptions = {}): Promise<FastifyInsta
       await v1.register(taskRoutes, { tasks });
       await v1.register(approvalRoutes, { tasks });
       await v1.register(auditEventRoutes);
+      await v1.register(memberRoutes);
+      await v1.register(invitationRoutes);
     },
     { prefix: '/api/v1' },
   );
