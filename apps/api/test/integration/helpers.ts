@@ -7,26 +7,43 @@ import { migrateUp } from '../../src/db/migrate.js';
 import { hashPassword } from '../../src/auth/password.js';
 import { MockAdapter } from '../../src/adapters/MockAdapter.js';
 import { loadConfig } from '../../src/config.js';
+import { recordTrustedVerification } from '../../src/policy/freeFirst.js';
 
 export const ORIGIN = 'http://localhost:5173';
-export const FREE_MODEL = 'openrouter/some-model:free';
-export const PAID_MODEL = 'openrouter/some-other-model';
-export const UNKNOWN_MODEL = 'gemini/some-preview-model';
+// Rows written through recordTrustedVerification, standing in for the future pricing-verification job.
+export const FREE_MODEL = 'openrouter/test-verified-free:free';
+export const PAID_MODEL = 'openrouter/test-verified-paid';
+export const UNKNOWN_MODEL = 'gemini/test-verified-unknown';
+// Placeholder rows from migration 003; never trusted, must always fail closed.
+export const SEEDED_FREE_MODEL = 'openrouter/some-model:free';
+export const SEEDED_PAID_MODEL = 'openrouter/some-other-model';
+export const SEEDED_UNKNOWN_MODEL = 'gemini/some-preview-model';
 
 const TENANT_TABLES = ['audit_events', 'approvals', 'tasks', 'agents', 'provider_connections', 'model_policies', 'websites'];
-const GLOBAL_TABLES = ['sessions', 'memberships', 'tenants', 'users'];
+const GLOBAL_TABLES = ['sessions', 'memberships', 'tenants', 'users', 'rate_limit_buckets'];
 
 export interface TestApp {
   app: FastifyInstance & { adapter: MockAdapter };
   adapter: MockAdapter;
 }
 
-/** Migrates the test database from whatever state it is in, then wipes all data (schema and model seed stay). */
+/**
+ * Migrates the test database from whatever state it is in, wipes all data,
+ * restores the seeded registry rows to their untrusted state, and (re)records
+ * fresh trusted verifications for the test models.
+ */
 export async function freshDatabase(): Promise<void> {
   if (loadConfig().nodeEnv !== 'test') throw new Error('refusing to wipe a non-test database');
   const pool = getPool();
   await migrateUp(pool);
   await pool.query(`TRUNCATE ${[...TENANT_TABLES, ...GLOBAL_TABLES].join(', ')} CASCADE`);
+  await pool.query(`UPDATE models SET verification_source = 'seed', last_verified_at = NULL WHERE model_id = ANY($1)`, [[SEEDED_FREE_MODEL, SEEDED_PAID_MODEL, SEEDED_UNKNOWN_MODEL]]);
+  const client = await pool.connect();
+  try {
+    await recordTrustedVerification(client, { provider: 'openrouter', modelId: FREE_MODEL, displayName: 'Test verified free', pricingStatus: 'verified_free', inputPrice: 0, outputPrice: 0 });
+    await recordTrustedVerification(client, { provider: 'openrouter', modelId: PAID_MODEL, displayName: 'Test verified paid', pricingStatus: 'paid', inputPrice: 3, outputPrice: 15 });
+    await recordTrustedVerification(client, { provider: 'gemini', modelId: UNKNOWN_MODEL, displayName: 'Test verified unknown', pricingStatus: 'unknown', inputPrice: null, outputPrice: null });
+  } finally { client.release(); }
 }
 
 export async function startApp(): Promise<TestApp> {

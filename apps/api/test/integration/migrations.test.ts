@@ -4,7 +4,7 @@ import { getPool, closePool } from '../../src/db/index.js';
 import { appliedMigrations, migrateDown, migrateUp } from '../../src/db/migrate.js';
 import { loadConfig } from '../../src/config.js';
 
-const ALL = ['001_core', '002_tenant_scoped', '003_seed_models', '004_rls_nullif'];
+const ALL = ['001_core', '002_tenant_scoped', '003_seed_models', '004_rls_nullif', '005_rate_limit_and_verification'];
 
 after(async () => { await migrateUp(getPool()); await closePool(); });
 
@@ -21,7 +21,10 @@ test('migrations apply from an empty database, are idempotent, roll back one ste
   const first = await migrateUp(pool);
   assert.deepEqual(first.applied, ALL);
   const tables = (await pool.query(`SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`)).rows.map((r) => r.tablename);
-  assert.deepEqual(tables, ['agents', 'approvals', 'audit_events', 'memberships', 'model_policies', 'models', 'provider_connections', 'schema_migrations', 'sessions', 'tasks', 'tenants', 'users', 'websites']);
+  assert.deepEqual(tables, ['agents', 'approvals', 'audit_events', 'memberships', 'model_policies', 'models', 'provider_connections', 'rate_limit_buckets', 'schema_migrations', 'sessions', 'tasks', 'tenants', 'users', 'websites']);
+  // 005: every seeded registry row is untrusted and carries no fake verification timestamp
+  const seeded = (await pool.query(`SELECT verification_source, last_verified_at FROM models`)).rows;
+  assert.ok(seeded.every((r) => r.verification_source === 'seed' && r.last_verified_at === null));
   const rls = (await pool.query(`SELECT relname FROM pg_class WHERE relrowsecurity AND relforcerowsecurity AND relkind = 'r' ORDER BY relname`)).rows.map((r) => r.relname);
   assert.deepEqual(rls, ['agents', 'approvals', 'audit_events', 'model_policies', 'provider_connections', 'tasks', 'websites']);
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM models')).rows[0].n, 3);
@@ -35,6 +38,9 @@ test('migrations apply from an empty database, are idempotent, roll back one ste
   const second = await migrateUp(pool);
   assert.deepEqual(second.applied, [], 're-running is a no-op');
 
+  assert.equal((await migrateDown(pool)).rolledBack, '005_rate_limit_and_verification');
+  const cols = (await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'models' AND column_name = 'verification_source'`)).rowCount;
+  assert.equal(cols, 0);
   assert.equal((await migrateDown(pool)).rolledBack, '004_rls_nullif');
   assert.equal((await migrateDown(pool)).rolledBack, '003_seed_models');
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM models')).rows[0].n, 0);
@@ -45,7 +51,7 @@ test('migrations apply from an empty database, are idempotent, roll back one ste
   assert.deepEqual(afterDown, ['memberships', 'schema_migrations', 'sessions', 'tenants', 'users']);
 
   const reup = await migrateUp(pool);
-  assert.deepEqual(reup.applied, ['002_tenant_scoped', '003_seed_models', '004_rls_nullif']);
+  assert.deepEqual(reup.applied, ['002_tenant_scoped', '003_seed_models', '004_rls_nullif', '005_rate_limit_and_verification']);
   assert.deepEqual(await appliedMigrations(pool), ALL);
 });
 

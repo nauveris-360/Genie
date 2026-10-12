@@ -32,7 +32,9 @@ export async function buildApp(options: BuildOptions = {}): Promise<FastifyInsta
   const app = Fastify({
     logger: options.logger === false ? false : { level: config.nodeEnv === 'test' ? 'silent' : 'info', redact: { paths: REDACT_PATHS, censor: '[redacted]' } },
     genReqId: () => randomUUID(),
-    trustProxy: true,
+    // Only the configured reverse proxies may set the client IP via
+    // X-Forwarded-For; with none configured, request.ip is the TCP peer.
+    trustProxy: config.trustedProxies.length ? config.trustedProxies : false,
   });
 
   await app.register(cookie);
@@ -41,6 +43,10 @@ export async function buildApp(options: BuildOptions = {}): Promise<FastifyInsta
   app.setErrorHandler((err, request, reply) => {
     const requestId = request.id;
     if (err instanceof AppError) {
+      if (err.retryAfterSeconds !== undefined) {
+        reply.header('Retry-After', String(err.retryAfterSeconds));
+        return reply.code(err.statusCode).send({ error: { code: err.code, message: err.message, requestId, retryAfterSeconds: err.retryAfterSeconds } });
+      }
       return reply.code(err.statusCode).send({ error: { code: err.code, message: err.message, requestId } });
     }
     const fastifyErr = err as { statusCode?: number; validation?: unknown };

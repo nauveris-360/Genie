@@ -2,32 +2,47 @@
   "list_response": {
     "data": [
       {
-        "modelId": "openrouter/some-model:free",
+        "modelId": "openrouter/example-model:free",
         "provider": "openrouter",
-        "displayName": "Some Model (free)",
+        "displayName": "Example Model (free)",
         "pricingStatus": "verified_free",
+        "verificationSource": "trusted",
         "allowed": true,
         "inputPricePerMillionTokensUsd": 0,
         "outputPricePerMillionTokensUsd": 0,
-        "lastVerifiedAt": "2026-10-10T00:00:00Z",
-        "usage": { "metric": "requests", "used": 12, "limit": 200, "isEstimate": false }
-      },
-      {
-        "modelId": "openrouter/some-other-model",
-        "provider": "openrouter",
-        "displayName": "Some Other Model",
-        "pricingStatus": "paid",
-        "allowed": false,
-        "inputPricePerMillionTokensUsd": 3.0,
-        "outputPricePerMillionTokensUsd": 15.0,
-        "lastVerifiedAt": "2026-10-10T00:00:00Z",
+        "lastVerifiedAt": "2026-10-12T00:00:00.000Z",
         "usage": null
       },
       {
-        "modelId": "gemini/some-preview-model",
-        "provider": "gemini",
-        "displayName": "Some Preview Model",
+        "modelId": "openrouter/example-paid-model",
+        "provider": "openrouter",
+        "displayName": "Example Paid Model",
+        "pricingStatus": "paid",
+        "verificationSource": "trusted",
+        "allowed": false,
+        "inputPricePerMillionTokensUsd": 3.0,
+        "outputPricePerMillionTokensUsd": 15.0,
+        "lastVerifiedAt": "2026-10-12T00:00:00.000Z",
+        "usage": null
+      },
+      {
+        "modelId": "openrouter/example-aged-model:free",
+        "provider": "openrouter",
+        "displayName": "Example Model with an old verification",
+        "pricingStatus": "stale",
+        "verificationSource": "trusted",
+        "allowed": false,
+        "inputPricePerMillionTokensUsd": 0,
+        "outputPricePerMillionTokensUsd": 0,
+        "lastVerifiedAt": "2026-09-01T00:00:00.000Z",
+        "usage": null
+      },
+      {
+        "modelId": "openrouter/some-model:free",
+        "provider": "openrouter",
+        "displayName": "Some Model (free)",
         "pricingStatus": "unknown",
+        "verificationSource": "seed",
         "allowed": false,
         "inputPricePerMillionTokensUsd": null,
         "outputPricePerMillionTokensUsd": null,
@@ -39,8 +54,11 @@
   "model_policy": {
     "tenantId": "44444444-4444-4444-8444-444444444444",
     "allowPaidFallback": false,
-    "updatedAt": "2026-10-01T00:00:00Z",
+    "updatedAt": "2026-10-01T00:00:00.000Z",
     "updatedBy": null
   },
-  "update_model_policy_request": { "allowPaidFallback": false }
+  "update_model_policy_request": { "allowPaidFallback": false },
+  "rate_limited_error": {
+    "error": { "code": "rate_limited", "message": "Too many sign-in attempts. Try again later.", "requestId": "12121212-1212-4121-8121-121212121212", "retryAfterSeconds": 840 }
+  }
 }

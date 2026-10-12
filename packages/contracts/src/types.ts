@@ -28,6 +28,8 @@ export interface ErrorEnvelope {
     code: string;
     message: string;
     requestId: UUID;
+    /** Present only on 429 rate_limited; equals the Retry-After response header (seconds). */
+    retryAfterSeconds?: number;
   };
 }
 
@@ -166,6 +168,9 @@ export interface SaveProviderConnectionRequest {
 
 export type PricingStatus = 'verified_free' | 'paid' | 'unknown' | 'stale';
 
+/** 'seed' = placeholder registry row; always fails closed. 'trusted' = written by the server-side pricing verification job. */
+export type VerificationSource = 'seed' | 'trusted';
+
 export interface ModelUsage {
   metric: 'tokens' | 'requests';
   used: number;
@@ -177,12 +182,18 @@ export interface Model {
   modelId: string;
   provider: ProviderName;
   displayName: string;
+  /** Effective status the policy uses: unverified rows report 'unknown', aged trusted rows report 'stale'. */
   pricingStatus: PricingStatus;
+  verificationSource: VerificationSource;
   allowed: boolean;
+  /** null unless verificationSource is 'trusted'. */
   inputPricePerMillionTokensUsd: number | null;
+  /** null unless verificationSource is 'trusted'. */
   outputPricePerMillionTokensUsd: number | null;
+  /** null unless verificationSource is 'trusted'. */
   lastVerifiedAt: ISODateTime | null;
-  usage?: ModelUsage | null;
+  /** Always null today: no provider usage integration exists. Never render an invented balance. */
+  usage: ModelUsage | null;
 }
 
 export interface ModelPolicy {

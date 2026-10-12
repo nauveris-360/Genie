@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { call, freshDatabase, seedWorkspace, startApp, stopApp, submitTask, teardown, type TestApp } from './helpers.js';
+import { call, FREE_MODEL, freshDatabase, seedWorkspace, startApp, stopApp, submitTask, teardown, type TestApp } from './helpers.js';
 import { closePool, getPool } from '../../src/db/index.js';
 import { HermesAdapter } from '../../src/adapters/HermesAdapter.js';
 
@@ -16,7 +16,7 @@ test('202 returns the persisted record; repeated idempotency key creates exactly
   assert.match(task.id, /^[0-9a-f-]{36}$/);
   assert.equal(task.idempotencyKey, 'key-1');
   assert.equal(task.status, 'succeeded');
-  assert.equal(task.result.text, '[mock:openrouter/some-model:free] draft reply');
+  assert.equal(task.result.text, `[mock:${FREE_MODEL}] draft reply`);
   assert.match(task.createdAt, /Z$/);
 
   const again = await submitTask(t, W.owner, W.tenantId, W.agentId, 'key-1', { prompt: 'draft reply' });
@@ -108,5 +108,5 @@ test('restart preserves task history, approvals and audit trail', async () => {
   const auditAfter = (await call(t, 'GET', `/api/v1/tenants/${W.tenantId}/audit-events`, { session: cookie })).json().data.length;
   assert.equal(auditAfter, auditBefore);
   const { rows } = await getPool().query('SELECT id FROM schema_migrations ORDER BY id');
-  assert.deepEqual(rows.map((r) => r.id), ['001_core', '002_tenant_scoped', '003_seed_models', '004_rls_nullif']);
+  assert.deepEqual(rows.map((r) => r.id), ['001_core', '002_tenant_scoped', '003_seed_models', '004_rls_nullif', '005_rate_limit_and_verification']);
 });

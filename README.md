@@ -38,13 +38,16 @@ npm run dev                                # http://localhost:4000/api/v1/health
 cp apps/api/.env.test.example apps/api/.env.test   # point at a disposable DB
 npm test
 ```
-31 integration tests run serially against a real PostgreSQL 16 database using a
+45 integration tests run serially against a real PostgreSQL 16 database using a
 mock agent adapter; details and coverage list in `docs/RUNBOOK.md`.
 
 ## Guarantees implemented and tested
 * Opaque server-side sessions in HttpOnly/SameSite cookies; argon2id passwords;
   CSRF double-submit bound to the session; strict `Origin`/`Referer` allowlist
   on every write including login (login-CSRF).
+* Login rate limiting (per address+account and per address, failures only,
+  `429` + `Retry-After`), proxy-safe client IP (`TRUSTED_PROXIES`, default none),
+  no account-wide lockout.
 * Server-enforced owner/admin/operator/viewer matrix (`@genie/contracts`
   `PERMISSION_ROLES`), membership resolved from the DB for the `tenantId` in
   every URL; cross-tenant access by ID tampering returns 404.
@@ -56,5 +59,6 @@ mock agent adapter; details and coverage list in `docs/RUNBOOK.md`.
   the persisted record; approvals immutable and bound to tenant + action +
   payload digest + expiry; full audit trail; state survives restart.
 * Free-first model policy enforced server-side for every call kind; paid
-  fallback off by default, never auto-enabled; unknown/stale pricing never
-  treated as free; no invented quota balances.
+  fallback off by default, never auto-enabled; seeded, unknown and stale
+  pricing never treated as free (fail closed until a trusted verification);
+  no invented quota balances.

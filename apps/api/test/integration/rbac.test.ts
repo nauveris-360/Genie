@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { PERMISSION_ROLES, roleHasPermission, type Role } from '@genie/contracts';
-import { call, freshDatabase, memberSession, seedWorkspace, startApp, submitTask, teardown, type Session, type TestApp } from './helpers.js';
+import { call, FREE_MODEL, freshDatabase, memberSession, seedWorkspace, startApp, submitTask, teardown, type Session, type TestApp } from './helpers.js';
 
 let t: TestApp;
 before(async () => { await freshDatabase(); t = await startApp(); });
@@ -38,7 +38,7 @@ test('server-enforced permission matrix matches the shared contract table for ev
     expectStatus(roleHasPermission(role, 'website:write'), w.statusCode, `${role} create website`, w.body);
     const p = await call(t, 'PATCH', `${base}/websites/${site.id}`, { session: s, payload: { label: `by-${role}` } });
     expectStatus(roleHasPermission(role, 'website:write'), p.statusCode, `${role} patch website`, p.body);
-    const a = await call(t, 'POST', `${base}/agents`, { session: s, payload: { name: `${role}-agent`, providerConnectionId: W.providerConnectionId, modelId: 'openrouter/some-model:free' } });
+    const a = await call(t, 'POST', `${base}/agents`, { session: s, payload: { name: `${role}-agent`, providerConnectionId: W.providerConnectionId, modelId: FREE_MODEL } });
     expectStatus(roleHasPermission(role, 'agent:write'), a.statusCode, `${role} create agent`, a.body);
     const pa = await call(t, 'PATCH', `${base}/agents/${W.agentId}`, { session: s, payload: { description: role } });
     expectStatus(roleHasPermission(role, 'agent:write'), pa.statusCode, `${role} patch agent`, pa.body);

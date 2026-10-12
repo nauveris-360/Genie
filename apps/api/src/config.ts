@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { parseAllowedOrigins } from './auth/originCheck.js';
 
 function required(name: string, value: string | undefined): string {
@@ -10,6 +11,36 @@ function required(name: string, value: string | undefined): string {
 function bool(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined || value === '') return fallback;
   return value === 'true' || value === '1';
+}
+
+function positiveInt(name: string, value: string | undefined, fallback: number): number {
+  if (value === undefined || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${name} must be a positive integer.`);
+  return n;
+}
+
+/**
+ * Proxies whose X-Forwarded-For we believe. Empty (the default) means none:
+ * the client IP is the TCP peer address and forwarded headers are ignored, so
+ * a client cannot pick its own rate-limit bucket by sending X-Forwarded-For.
+ * Entries are exact IPs or CIDR ranges of the reverse proxy in front of the API.
+ */
+function parseTrustedProxies(raw: string | undefined): string[] {
+  const out: string[] = [];
+  for (const part of (raw ?? '').split(',')) {
+    const entry = part.trim();
+    if (!entry) continue;
+    const [addr, bits, extra] = entry.split('/');
+    const family = isIP(addr ?? '');
+    const max = family === 4 ? 32 : 128;
+    const validBits = bits === undefined || (/^\d+$/.test(bits) && Number(bits) <= max);
+    if (!family || !validBits || extra !== undefined) {
+      throw new Error(`TRUSTED_PROXIES entry "${entry}" is not an IP address or CIDR range.`);
+    }
+    out.push(entry);
+  }
+  return out;
 }
 
 export interface Config {
@@ -26,6 +57,12 @@ export interface Config {
   credentialEncryptionKey: string;
   /** Absolute origins allowed to make state-changing requests (login-CSRF defense). */
   allowedOrigins: Set<string>;
+  trustedProxies: string[];
+  loginRateLimitWindowSeconds: number;
+  loginMaxFailuresPerIp: number;
+  loginMaxFailuresPerIpAccount: number;
+  /** A trusted price verification older than this is treated as stale and fails closed. */
+  modelPricingMaxAgeHours: number;
   defaultAllowPaidFallback: boolean;
   hermesEnabled: boolean;
   hermesBaseUrl: string | undefined;
@@ -49,6 +86,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     csrfCookieName: env.CSRF_COOKIE_NAME ?? 'genie_csrf',
     credentialEncryptionKey: required('CREDENTIAL_ENCRYPTION_KEY', env.CREDENTIAL_ENCRYPTION_KEY),
     allowedOrigins: parseAllowedOrigins(required('ALLOWED_ORIGINS', env.ALLOWED_ORIGINS)),
+    trustedProxies: parseTrustedProxies(env.TRUSTED_PROXIES),
+    loginRateLimitWindowSeconds: positiveInt('LOGIN_RATE_LIMIT_WINDOW_SECONDS', env.LOGIN_RATE_LIMIT_WINDOW_SECONDS, 900),
+    loginMaxFailuresPerIp: positiveInt('LOGIN_MAX_FAILURES_PER_IP', env.LOGIN_MAX_FAILURES_PER_IP, 20),
+    loginMaxFailuresPerIpAccount: positiveInt('LOGIN_MAX_FAILURES_PER_IP_ACCOUNT', env.LOGIN_MAX_FAILURES_PER_IP_ACCOUNT, 5),
+    modelPricingMaxAgeHours: positiveInt('MODEL_PRICING_MAX_AGE_HOURS', env.MODEL_PRICING_MAX_AGE_HOURS, 72),
     defaultAllowPaidFallback: bool(env.DEFAULT_ALLOW_PAID_FALLBACK, false),
     hermesEnabled: bool(env.HERMES_ENABLED, false),
     hermesBaseUrl: env.HERMES_BASE_URL || undefined,

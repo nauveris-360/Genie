@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { AuthMe, Membership, Role } from '@genie/contracts';
@@ -10,6 +11,8 @@ import { normalizeEmail } from '../../lib/strings.js';
 import { verifyPassword } from '../../auth/password.js';
 import { createSession, deleteSession } from '../../auth/session.js';
 import { requireUser } from '../../auth/plugin.js';
+import { clear, release, reserve } from '../../auth/rateLimit.js';
+import { clientKey } from '../../lib/clientKey.js';
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -52,9 +55,37 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   const config = loadConfig();
   const secure = config.nodeEnv === 'production';
 
+  /**
+   * Login throttling uses two buckets, both keyed on the client IP (request.ip,
+   * which only honours X-Forwarded-For from TRUSTED_PROXIES):
+   *   - per IP: bounds guessing/stuffing across many accounts from one source;
+   *   - per (IP, account): bounds guessing against one account from one source.
+   * There is intentionally no account-wide lockout: an attacker anywhere could
+   * otherwise lock a victim out of their own account. A victim signing in from
+   * their own address always has an unspent budget. Only failures count: a
+   * successful login refunds its IP reservation and clears its pair bucket.
+   * Limited requests are rejected before any password verification, with one
+   * generic message for every case, so a 429 is neither a password oracle nor
+   * an account-existence oracle.
+   */
   app.post('/auth/login', async (request, reply: FastifyReply) => {
     const body = parseOrThrow(loginSchema, request.body);
     const email = normalizeEmail(body.email);
+    const source = clientKey(request.ip);
+    const ipKey = `login:ip:${source}`;
+    const pairKey = `login:pair:${source}:${createHash('sha256').update(email).digest('hex')}`;
+    const windowSeconds = config.loginRateLimitWindowSeconds;
+
+    const blocked = await withClient(async (client) => {
+      const ip = await reserve(client, ipKey, config.loginMaxFailuresPerIp, windowSeconds);
+      const pair = await reserve(client, pairKey, config.loginMaxFailuresPerIpAccount, windowSeconds);
+      if (ip.allowed && pair.allowed) return null;
+      // A rejected attempt is not evaluated, so it must not consume budget either.
+      await release(client, ipKey);
+      await release(client, pairKey);
+      return Math.max(ip.allowed ? 0 : ip.retryAfterSeconds, pair.allowed ? 0 : pair.retryAfterSeconds);
+    });
+    if (blocked !== null) throw errors.loginRateLimited(blocked);
 
     const user = await withClient(async (client) => {
       const { rows } = await client.query<{ id: string; password_hash: string }>(
@@ -69,6 +100,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const ok = await verifyPassword(user?.password_hash ?? DUMMY, body.password);
     if (!user || !ok) throw errors.invalidCredentials();
 
+    await withClient(async (client) => {
+      await release(client, ipKey);
+      await clear(client, pairKey);
+    });
     const created = await withClient((client) => createSession(client, user.id));
     reply.setCookie(config.sessionCookieName, created.token, cookieOptions(secure, true, created.expiresAt));
     reply.setCookie(config.csrfCookieName, created.csrfToken, cookieOptions(secure, false, created.expiresAt));

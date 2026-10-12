@@ -74,9 +74,48 @@ npm run migrate:rollback   # rolls back exactly ONE migration (the latest)
 npm run migrate            # re-applies
 ```
 Rollback drops tables and their data for that step — take a database-aware
-backup first in any shared environment. Rolling back `003` removes the seeded
-registry rows (agents referencing them keep their `model_id` text but become
-`model_not_allowed`); rolling back `002` drops all tenant operational data.
+backup first in any shared environment. Rolling back `005` drops the
+rate-limit buckets and the `verification_source` column (so trusted/seed
+provenance is lost; re-run verification after re-applying). Rolling back `003`
+removes the seeded registry rows (agents referencing them keep their
+`model_id` text but become `model_not_allowed`); rolling back `002` drops all
+tenant operational data.
+
+## Login rate limiting
+Failures only, fixed window (`LOGIN_RATE_LIMIT_WINDOW_SECONDS`, default 900):
+at most `LOGIN_MAX_FAILURES_PER_IP_ACCOUNT` (5) per client address + account
+and `LOGIN_MAX_FAILURES_PER_IP` (20) per client address. Counters live in
+PostgreSQL (`rate_limit_buckets`, account part stored only as a SHA-256 of the
+normalised email), so limits survive restarts and multiple instances; expired
+rows are swept hourly. Reservation is a single atomic UPSERT taken *before*
+password verification, so concurrency cannot overshoot and limited requests
+cost no argon2 work. 429 responses carry `Retry-After` and
+`error.retryAfterSeconds` with one generic message.
+
+There is deliberately **no account-wide lockout**: it would let anyone lock a
+user out. The trade-off is that a distributed attacker gets
+5 guesses per account per window *per address they control* (IPv6 grouped by
+/64). Mitigations beyond this milestone: MFA, breached-password screening,
+alerting on per-account failure spikes from many addresses.
+
+**Client IP.** With `TRUSTED_PROXIES` empty (default) the client is the TCP
+peer and `X-Forwarded-For` is ignored. Behind a reverse proxy, set
+`TRUSTED_PROXIES` to exactly the proxy's address/CIDR; the client is then the
+right-most `X-Forwarded-For` hop that is not a trusted proxy. Getting this
+wrong in either direction is a security issue: too broad lets clients spoof
+their bucket; empty behind a proxy puts every user in the proxy's single
+bucket (shared 20-failure budget). Invalid values abort startup.
+
+## Model pricing provenance (fail closed)
+Every row in `models` has `verification_source`: `seed` (placeholder, from
+migrations) or `trusted` (written only by `recordTrustedVerification`, the
+entry point for a future server-side pricing-verification job; no HTTP route
+can set it). The policy treats `seed` rows as `unknown` and never allows
+them, not even with paid fallback. A `trusted` row older than
+`MODEL_PRICING_MAX_AGE_HOURS` (72) is `stale` and refused until re-verified.
+**Consequence today: with no verification job, no model is usable in a real
+deployment** — every task fails `409 model_not_allowed`. That is intended
+until a trusted verification exists; do not work around it by editing rows.
 
 ## Restart / persistence
 All state (sessions, tasks, approvals, audit history) is in PostgreSQL; the API
@@ -86,7 +125,7 @@ rebuilds them against the same database.
 
 ## Tests
 ```bash
-npm test     # 31 integration tests, serial, against DATABASE_URL in apps/api/.env.test
+npm test     # 45 integration tests, serial, against DATABASE_URL in apps/api/.env.test
 ```
 The suite migrates the test database from whatever state it is in, truncates
 data between files, and in `migrations.test.ts` drops and recreates the schema.
@@ -98,7 +137,14 @@ rest + wrong-key/tamper failure, idempotency (including concurrent duplicates),
 202-is-persisted-record, cancel semantics, pagination, adapter failure and
 Hermes-unavailable visibility, approval approve/reject/replay/payload-change/
 expiry, free-first blocking for every task type and paid-fallback semantics,
-migrations up/idempotent/down/re-up/checksum tamper, restart persistence.
+seeded/stale/unknown/paid registry rows failing closed (and stale → re-verified),
+login rate limiting (per-pair and per-address bounds, Retry-After, no
+password or account-existence oracle, no lockout of the user at another
+address, concurrent-race bound, success refunds, window expiry,
+X-Forwarded-For spoofing with and without a trusted proxy, IPv6 /64 grouping,
+invalid proxy config), migrations up/idempotent/down/re-up/checksum tamper,
+restart persistence. Test model rows are written through
+`recordTrustedVerification`, standing in for the future verification job.
 
 ## Containers (review only — not deployed)
 `infra/Dockerfile.api` builds the API as a non-root image with no secrets baked
@@ -113,8 +159,9 @@ infrastructure requires owner approval and the deployment steps in BUILD-SPEC.md
   interface before `HermesAdapter` gets a real implementation.
 * **n8n execution, provider usage/quota, email, voice, SEO, publishing, billing**:
   not implemented; `Model.usage` is always `null`.
-* **Model registry pricing**: seeded placeholders. A verification job that
-  refreshes `pricing_status` / prices / `last_verified_at` from live provider
-  data is still to be built; until then only the seeded `verified_free` row passes.
-* **Rate limiting** on login: the contract reserves `429 rate_limited`, but no
-  limiter is wired yet (pending choice of store).
+* **Model pricing verification job**: not built. Seeded rows are placeholders
+  and fail closed, so no model is usable outside tests until a trusted job
+  calls `recordTrustedVerification` (needs owner decision on the pricing source;
+  it must not use paid API calls).
+* **Rate limiting** covers `/auth/login` only. Other endpoints require a
+  session and are not throttled yet.

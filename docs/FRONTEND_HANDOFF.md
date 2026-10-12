@@ -6,10 +6,22 @@ For AI Studio (apps/web) and Codex reconciliation. Source of truth is
 example payloads for every endpoint are in `packages/contracts/fixtures/*.json`.
 If this page and the YAML ever disagree, the YAML wins — tell us.
 
-Status: backend implemented and integration-tested against PostgreSQL 16 with a
-**mock** agent adapter. Hermes is **not** integrated (readiness reports it
-`unavailable`); n8n execution, provider usage/quota figures, email, voice, SEO,
-publishing and billing are not implemented. Nothing is deployed.
+Status: backend implemented and integration-tested (45 tests) against
+PostgreSQL 16 with a **mock** agent adapter. Hermes is **not** integrated
+(readiness reports it `unavailable`). There is **no pricing-verification job
+yet, so in a real deployment every model is refused** (`409
+model_not_allowed`) — that is intended fail-closed behaviour, not a bug. n8n
+execution, provider usage/quota figures, email, voice, SEO, publishing and
+billing are not implemented. Nothing is deployed.
+
+## Changes since the first handoff
+* `POST /auth/login` is rate limited → `429 rate_limited` with `Retry-After`
+  header and `error.retryAfterSeconds`.
+* `ErrorEnvelope.error.retryAfterSeconds?: number` (only on 429).
+* `Model.verificationSource: 'seed' | 'trusted'` (new, required).
+  `Model.pricingStatus` is now the *effective* status: `seed` rows report
+  `unknown`; trusted rows older than 72 h report `stale`. Prices and
+  `lastVerifiedAt` are `null` unless `trusted`. `usage` is always present and `null`.
 
 ## Transport conventions
 
@@ -20,7 +32,7 @@ publishing and billing are not implemented. Nothing is deployed.
 | Timestamps | UTC ISO-8601 with `Z` (`2026-10-12T03:00:00.000Z`) |
 | Single resource | `{ "data": <resource> }` |
 | List | `{ "data": [...], "page": { "nextCursor": string \| null } }` |
-| Error | `{ "error": { "code": string, "message": string, "requestId": uuid } }` — never a stack trace |
+| Error | `{ "error": { "code", "message", "requestId", "retryAfterSeconds"? } }` — never a stack trace |
 | Task submit success | `202` with the **full persisted Task** in `data` |
 | Create success | `201`; other writes `200` |
 
@@ -28,7 +40,8 @@ publishing and billing are not implemented. Nothing is deployed.
 Query `?limit=1..100` (default 20) and `?cursor=<opaque>` taken verbatim from
 the previous `page.nextCursor`. Lists are newest-first and stable under inserts.
 An invalid `cursor`/`limit` → `400 validation_error`. Tasks and approvals also
-accept `?status=<enum>`.
+accept `?status=<enum>`. `GET …/models` and `GET …/providers` return the full
+set (`providers` includes `page.nextCursor: null`; `models` has no `page`).
 
 ### Auth: cookies, CSRF, Origin
 * Session cookie `genie_sid` — HttpOnly, SameSite=Lax, Secure in production,
@@ -37,14 +50,27 @@ accept `?status=<enum>`.
   read it. Send its value as header `X-CSRF-Token` on every `POST/PUT/PATCH/DELETE`
   except `POST /auth/login`. Missing/mismatched → `403 csrf_mismatch`.
 * **Origin**: every state-changing request, *including login*, must carry an
-  `Origin` (browsers do this automatically for `fetch`) whose value is in the
-  server's `ALLOWED_ORIGINS` allowlist; otherwise `403 forbidden` ("Request origin
-  is not trusted"). `Referer` is accepted as a fallback. This is the login-CSRF
-  defense. Use `fetch(..., { credentials: 'include' })`.
+  `Origin` (browsers do this automatically for `fetch`) in the server's
+  `ALLOWED_ORIGINS` allowlist; otherwise `403 forbidden` ("Request origin is not
+  trusted"). `Referer` is accepted as a fallback. This is the login-CSRF defense.
+  Use `fetch(..., { credentials: 'include' })`.
 * Logout clears both cookies and deletes the server session. Sessions survive
   API restarts (they are DB rows). `401 unauthorized` means "sign in"; after a
   `401` on `/auth/me` treat the user as signed out.
 * No tokens in `localStorage`/`sessionStorage`, ever.
+
+### Login rate limiting (what the sign-in screen must handle)
+* Only **failed** attempts count, per 15-minute window: 5 per (client address,
+  account) and 20 per client address. A successful sign-in costs nothing.
+* On `429 rate_limited`: show the generic message, disable submit, and count
+  down from `Retry-After` (header) / `error.retryAfterSeconds` (same value,
+  seconds). Do not retry automatically.
+* The 429 is identical for wrong/unknown accounts and for per-address vs
+  per-account limits, and a **correct** password is also refused while
+  limited. Do not tell users "your account is locked": it isn't. There is no
+  account-wide lockout; signing in from another network works normally.
+* `401 invalid_credentials` message is the same for unknown email and bad
+  password; keep it that way in the UI.
 
 ## Permission matrix (server-enforced; UI gating is cosmetic)
 
@@ -88,10 +114,14 @@ Agent       { id, tenantId, name, description: string|null, status: 'active'|'di
               createdAt, updatedAt }
 ProviderConnection { id, tenantId, provider: 'openrouter'|'gemini', label,
               credentialStatus: 'present'|'missing', createdAt, updatedAt }   // never the credential
-Model       { modelId, provider, displayName, pricingStatus: 'verified_free'|'paid'|'unknown'|'stale',
-              allowed: boolean, inputPricePerMillionTokensUsd: number|null,
-              outputPricePerMillionTokensUsd: number|null, lastVerifiedAt: string|null,
-              usage: { metric:'tokens'|'requests', used, limit:number|null, isEstimate } | null }
+Model       { modelId, provider, displayName,
+              pricingStatus: 'verified_free'|'paid'|'unknown'|'stale',   // effective status
+              verificationSource: 'seed'|'trusted',
+              allowed: boolean,
+              inputPricePerMillionTokensUsd: number|null,    // null unless trusted
+              outputPricePerMillionTokensUsd: number|null,   // null unless trusted
+              lastVerifiedAt: string|null,                   // null unless trusted
+              usage: null }                                  // no usage integration yet
 ModelPolicy { tenantId, allowPaidFallback: boolean, updatedAt, updatedBy: uuid|null }
 Task        { id, tenantId, websiteId: uuid|null, agentId,
               type: 'chat'|'summarize'|'embed'|'title_generate',
@@ -105,21 +135,22 @@ AuditEvent  { id, tenantId, actorUserId: uuid|null, action, targetType, targetId
 Readiness   { data: { status:'ok'|'degraded', checks: { database: {status, detail?}, agentAdapter: {status, detail?} } } }
 ```
 
-`usage` is currently always `null` — there is no provider usage integration.
-Do not render a remaining balance; render "not reported".
+Render `usage: null` as "not reported". Never show a remaining balance.
+Render `verificationSource: 'seed'` as "pricing not verified" and never show
+its prices (they are `null`).
 
 ## Request payloads
 
 | Call | Body / headers |
 | --- | --- |
-| `POST /auth/login` | `{ email, password }` → 200 `AuthMe` + both cookies. 401 `invalid_credentials` (same message for unknown email and bad password). |
+| `POST /auth/login` | `{ email, password }` → 200 `AuthMe` + both cookies. 401 `invalid_credentials`. 429 `rate_limited` + `Retry-After`. |
 | `POST /auth/logout` | none |
 | `POST /tenants` | `{ name }` (1–200) |
 | `POST …/websites` | `{ label, url }` (url must be absolute) |
 | `PATCH …/websites/{id}` | any of `{ label, url, status }`, ≥1 field |
 | `POST …/agents` | `{ name, providerConnectionId, modelId, description?, requiresApproval? = true, config? }` |
 | `PATCH …/agents/{id}` | any of `{ name, description, status, providerConnectionId, modelId, requiresApproval, config }` |
-| `POST …/providers` | `{ provider, label, credential }` — `credential` is write-only; 201 returns metadata only. Only on an explicit user action; never prefilled. |
+| `POST …/providers` | `{ provider, label, credential }` — `credential` is write-only; 201 returns metadata only. Only on an explicit user action; never prefilled; never in demo mode. |
 | `PUT …/model-policy` | `{ allowPaidFallback }` — enabling is an explicit, audited owner/admin act. |
 | `POST …/tasks` | header **`Idempotency-Key`** (required, 1–200 chars; generate a UUID per user intent and reuse it on retry) + `{ agentId, type, input: object, websiteId? }` |
 | `POST …/tasks/{id}/cancel` | none |
@@ -131,15 +162,17 @@ Do not render a remaining balance; render "not reported".
 `forbidden`(403, also untrusted Origin) · `csrf_mismatch`(403) · `not_found`(404) ·
 `idempotency_key_conflict`(409) · `model_not_allowed`(409) · `approval_expired`(409) ·
 `approval_payload_mismatch`(409) · `approval_already_decided`(409) ·
-`task_not_cancellable`(409) · `rate_limited`(429) · `internal_error`(500).
-Always surface `requestId` in error UI.
+`task_not_cancellable`(409) · `rate_limited`(429, with `retryAfterSeconds`) ·
+`internal_error`(500). Always surface `requestId` in error UI.
 
 ## Task & approval semantics
 
 1. `POST …/tasks` validates agent ∈ tenant, website ∈ tenant, and the agent's
    `modelId` against the tenant's **free-first policy at submit time** (every
    `type`, including `embed`/`title_generate`/`summarize`). Disallowed → `409
-   model_not_allowed`, no task row is created.
+   model_not_allowed`, no task row is created. A model that was allowed when
+   the agent was created can become disallowed later (policy tightened or
+   pricing went stale); surface the message, don't hide the agent.
 2. Same `Idempotency-Key` + identical body → `202` with the **original** task
    (same `id`); same key + different body → `409 idempotency_key_conflict`.
 3. If `agent.requiresApproval` is `true` (default), the task is persisted as
@@ -148,9 +181,9 @@ Always surface `requestId` in error UI.
    60-minute `expiresAt`. Nothing reaches the model before approval.
 4. If `requiresApproval` is `false`, the task runs synchronously through the
    adapter inside the same request; the 202 body already shows the final status
-   (`succeeded`/`failed`). With the real Hermes adapter not integrated, a
-   production-configured API returns `failed` with a visible error, never a fake
-   result. **Poll `GET …/tasks/{id}` anyway** — the contract allows `queued`/`running`.
+   (`succeeded`/`failed`). With Hermes not integrated, a production-configured
+   API returns `failed` with a visible error, never a fake result. **Poll
+   `GET …/tasks/{id}` anyway** — the contract allows `queued`/`running`.
 5. Approve → decision recorded (immutable, `decidedBy/At` set) → task runs →
    `succeeded`/`failed`. Reject → task `cancelled`, `error = "rejected: <reason>"`.
 6. Replay of a decided approval → `409 approval_already_decided`. Any change to
@@ -167,12 +200,22 @@ Always surface `requestId` in error UI.
 ## Free-first policy (what the UI should expect)
 
 `allowPaidFallback` defaults to **false** per tenant and is never flipped by
-the backend. `GET …/models` returns the registry with `allowed` computed for the
-tenant: only `verified_free` with verified **zero** input and output price is
-allowed by default; `paid` becomes allowed only after an owner/admin sets
-`allowPaidFallback: true`; `unknown`/`stale` are **never** allowed, even then.
-The `:free` suffix is not trusted on its own. The registry currently holds
-placeholder entries pending a real pricing-verification job.
+the backend. `GET …/models` returns every registry row with `allowed` computed
+for the tenant:
+
+| verificationSource | effective pricingStatus | allowed (fallback off) | allowed (fallback on) |
+| --- | --- | :-: | :-: |
+| `seed` | `unknown` (always) | ✗ | ✗ |
+| `trusted` | `verified_free` (zero input **and** output price, ≤72 h old) | ✓ | ✓ |
+| `trusted` | `paid` (≤72 h old) | ✗ | ✓ |
+| `trusted` | `unknown` | ✗ | ✗ |
+| `trusted` | `stale` (explicitly, or older than 72 h) | ✗ | ✗ |
+
+The `:free` suffix in a model id carries no weight. Only a server-side
+verification job can mark a row `trusted`; no API call can. None exists yet,
+so today every real model shows `allowed: false`. The agent model picker
+should list all rows, disable the not-allowed ones, and explain why using
+`pricingStatus`/`verificationSource`.
 
 ## Health
 `GET /health/live` → `200 {data:{status:'ok'}}`. `GET /health/ready` → `200` or
@@ -183,4 +226,5 @@ state honestly in Integrations/Overview; do not label execution as available.
 ## Demo mode
 Keep demo fixtures isolated and labelled; never accept a credential in demo
 mode. In real mode call these endpoints only; where a capability is not
-implemented (usage, Hermes execution, n8n), show it as unavailable.
+implemented (usage, Hermes execution, n8n, pricing verification), show it as
+unavailable.

@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { call, freshDatabase, seedWorkspace, startApp, submitTask, teardown, type TestApp } from './helpers.js';
+import { call, FREE_MODEL, freshDatabase, seedWorkspace, startApp, submitTask, teardown, type TestApp } from './helpers.js';
 import { getPool } from '../../src/db/index.js';
 
 let t: TestApp;
@@ -33,7 +33,7 @@ test('tenant A cannot read, edit, execute, cancel or decide tenant B records by 
 
   // Cross-tenant references inside A's own URL space: B's agent/connection/website/task ids do not resolve in A.
   assert.equal((await submitTask(t, A.owner, A.tenantId, B.agentId, 'a-x')).statusCode, 404);
-  assert.equal((await call(t, 'POST', `/api/v1/tenants/${A.tenantId}/agents`, { session: A.owner, payload: { name: 'x', providerConnectionId: B.providerConnectionId, modelId: 'openrouter/some-model:free' } })).statusCode, 404);
+  assert.equal((await call(t, 'POST', `/api/v1/tenants/${A.tenantId}/agents`, { session: A.owner, payload: { name: 'x', providerConnectionId: B.providerConnectionId, modelId: FREE_MODEL } })).statusCode, 404);
   assert.equal((await call(t, 'GET', `/api/v1/tenants/${A.tenantId}/tasks/${taskB.id}`, { session: A.owner })).statusCode, 404);
   assert.equal((await call(t, 'PATCH', `/api/v1/tenants/${A.tenantId}/websites/${siteB.id}`, { session: A.owner, payload: { label: 'x' } })).statusCode, 404);
   assert.equal((await call(t, 'POST', `/api/v1/tenants/${A.tenantId}/approvals/${taskB.approvalId}/decision`, { session: A.owner, payload: { decision: 'approve' } })).statusCode, 404);

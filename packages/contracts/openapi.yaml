@@ -66,9 +66,17 @@ paths:
       description: |
         Verifies email + password against stored password hashes and, on success, creates an
         opaque server-side session row and sets the session cookie and a paired CSRF cookie.
-        No CSRF header is required on this request (no session exists yet). Rate limiting and
-        generic failure messages (no "email not found" vs "bad password" distinction) are
-        enforced server-side.
+        No CSRF header is required on this request (no session exists yet), but the Origin
+        (or Referer) must be in the server's allowlist (login-CSRF defense).
+
+        Rate limiting (failures only, fixed window, default 15 minutes): at most 5 failed
+        attempts per (client IP, account) and 20 per client IP. There is no account-wide
+        lockout, so attempts from one address can never lock the account for a user at
+        another address. Client IP is the TCP peer unless the request arrives via a
+        configured trusted proxy; IPv6 clients are grouped by /64. A limited attempt is
+        rejected before the password is checked (a correct password is also refused until
+        Retry-After), and the 429 is identical for per-IP, per-account, existing and
+        unknown accounts. A successful login does not consume budget.
       security: []
       requestBody:
         required: true
@@ -930,10 +938,17 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorEnvelope' }
     RateLimited:
-      description: Too many requests.
+      description: Too many attempts. Retry after the indicated number of seconds.
+      headers:
+        Retry-After:
+          description: Seconds until the current rate-limit window ends.
+          schema: { type: integer, minimum: 1 }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            default:
+              value: { error: { code: "rate_limited", message: "Too many sign-in attempts. Try again later.", requestId: "12121212-1212-4121-8121-121212121212", retryAfterSeconds: 840 } }
 
   schemas:
     ErrorEnvelope:
@@ -947,6 +962,7 @@ components:
             code: { type: string }
             message: { type: string }
             requestId: { type: string, format: uuid }
+            retryAfterSeconds: { type: integer, minimum: 1, description: "Present only on 429 rate_limited; equals the Retry-After header." }
 
     PageInfo:
       type: object
@@ -1152,20 +1168,29 @@ components:
       type: string
       enum: [verified_free, paid, unknown, stale]
 
+    VerificationSource:
+      type: string
+      enum: [seed, trusted]
+      description: "seed = placeholder registry row, always fails closed; trusted = written by the server-side pricing verification job (not reachable via the API)."
+
     Model:
       type: object
-      required: [modelId, provider, displayName, pricingStatus, allowed]
+      required: [modelId, provider, displayName, pricingStatus, verificationSource, allowed, inputPricePerMillionTokensUsd, outputPricePerMillionTokensUsd, lastVerifiedAt, usage]
       properties:
         modelId: { type: string }
         provider: { $ref: '#/components/schemas/ProviderName' }
         displayName: { type: string }
-        pricingStatus: { $ref: '#/components/schemas/PricingStatus' }
-        allowed: { type: boolean, description: "Whether this tenant may currently use this model under its free-first policy." }
-        inputPricePerMillionTokensUsd: { type: [number, "null"] }
-        outputPricePerMillionTokensUsd: { type: [number, "null"] }
-        lastVerifiedAt: { type: [string, "null"], format: date-time }
+        pricingStatus:
+          $ref: '#/components/schemas/PricingStatus'
+          description: "Effective status used by the policy: unverified (seed) rows report unknown; trusted rows older than the freshness window report stale."
+        verificationSource: { $ref: '#/components/schemas/VerificationSource' }
+        allowed: { type: boolean, description: "Whether this tenant may currently use this model under its free-first policy. Always false for seed, unknown and stale rows." }
+        inputPricePerMillionTokensUsd: { type: [number, "null"], description: "null unless verificationSource is trusted." }
+        outputPricePerMillionTokensUsd: { type: [number, "null"], description: "null unless verificationSource is trusted." }
+        lastVerifiedAt: { type: [string, "null"], format: date-time, description: "null unless verificationSource is trusted." }
         usage:
           type: [object, "null"]
+          description: "Always null today: no provider usage integration exists."
           properties:
             metric: { type: string, enum: [tokens, requests], description: "Some providers report quota by request count rather than tokens." }
             used: { type: number }

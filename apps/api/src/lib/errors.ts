@@ -21,12 +21,15 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
 export class AppError extends Error {
   readonly code: ErrorCode;
   readonly statusCode: number;
+  /** Set on 429s; sent as the Retry-After header and error.retryAfterSeconds. */
+  readonly retryAfterSeconds: number | undefined;
 
-  constructor(code: ErrorCode, message: string) {
+  constructor(code: ErrorCode, message: string, retryAfterSeconds?: number) {
     super(message);
     this.name = 'AppError';
     this.code = code;
     this.statusCode = STATUS_BY_CODE[code];
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -48,5 +51,7 @@ export const errors = {
     new AppError('approval_already_decided', 'This approval was already approved or rejected and cannot be changed.'),
   taskNotCancellable: (status: string) =>
     new AppError('task_not_cancellable', `Task is already ${status} and cannot be cancelled.`),
-  rateLimited: () => new AppError('rate_limited', 'Too many requests. Try again shortly.'),
+  /** Deliberately identical for per-IP and per-account limits and for unknown accounts, so it reveals nothing. */
+  loginRateLimited: (retryAfterSeconds: number) =>
+    new AppError('rate_limited', 'Too many sign-in attempts. Try again later.', retryAfterSeconds),
 };

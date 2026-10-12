@@ -1,27 +1,66 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { call, FREE_MODEL, freshDatabase, PAID_MODEL, seedWorkspace, startApp, submitTask, teardown, UNKNOWN_MODEL, type TestApp } from './helpers.js';
-import { evaluateModel, type ModelRow } from '../../src/policy/freeFirst.js';
+import {
+  call, FREE_MODEL, freshDatabase, PAID_MODEL, SEEDED_FREE_MODEL, SEEDED_PAID_MODEL, SEEDED_UNKNOWN_MODEL,
+  seedWorkspace, startApp, submitTask, teardown, UNKNOWN_MODEL, type TestApp,
+} from './helpers.js';
+import { effectivePricingStatus, evaluateModel, recordTrustedVerification, type ModelRow } from '../../src/policy/freeFirst.js';
 import { getPool } from '../../src/db/index.js';
 
 let t: TestApp;
 before(async () => { await freshDatabase(); t = await startApp(); });
 after(async () => { await teardown(t); });
 
-const row = (pricingStatus: ModelRow['pricingStatus'], input: number | null, output: number | null): ModelRow =>
-  ({ provider: 'openrouter', modelId: 'm', displayName: 'm', pricingStatus, inputPrice: input, outputPrice: output, lastVerifiedAt: null });
+const NOW = new Date('2026-10-12T12:00:00Z');
+const HOURS = (h: number) => new Date(NOW.getTime() - h * 3_600_000);
+const clock = { now: NOW, maxAgeHours: 72 };
+const row = (o: Partial<ModelRow>): ModelRow => ({
+  provider: 'openrouter', modelId: 'm', displayName: 'm', pricingStatus: 'verified_free', inputPrice: 0, outputPrice: 0,
+  lastVerifiedAt: HOURS(1), verificationSource: 'trusted', ...o,
+});
+const KINDS = ['chat', 'summarize', 'embed', 'title_generate', 'auxiliary', 'plugin'] as const;
 
-test('policy engine: only verified zero-priced models are free; unknown/stale are never allowed; paid needs explicit opt-in', () => {
-  for (const kind of ['chat', 'summarize', 'embed', 'title_generate', 'auxiliary', 'plugin'] as const) {
-    assert.equal(evaluateModel(row('verified_free', 0, 0), false, kind).allowed, true, kind);
-    assert.equal(evaluateModel(row('verified_free', 0, 0.5), false, kind).allowed, false, `${kind}: :free label with non-zero verified output price`);
-    assert.equal(evaluateModel(row('paid', 3, 15), false, kind).allowed, false, kind);
-    assert.equal(evaluateModel(row('paid', 3, 15), true, kind).allowed, true, kind);
-    assert.equal(evaluateModel(row('unknown', null, null), false, kind).allowed, false, kind);
-    assert.equal(evaluateModel(row('unknown', null, null), true, kind).allowed, false, `${kind}: unknown pricing even with paid fallback`);
-    assert.equal(evaluateModel(row('stale', 0, 0), true, kind).allowed, false, `${kind}: stale verification`);
-    assert.equal(evaluateModel(null, true, kind).allowed, false, `${kind}: unregistered model`);
+test('policy engine fails closed for seeded, stale, unknown and unregistered rows; paid needs opt-in', () => {
+  for (const kind of KINDS) {
+    for (const fallback of [false, true]) {
+      const label = `${kind} fallback=${fallback}`;
+      assert.equal(evaluateModel(row({}), fallback, kind, clock).allowed, true, `${label}: fresh trusted free`);
+      // Seeded placeholder: fails no matter what it claims, even with paid fallback.
+      assert.equal(evaluateModel(row({ verificationSource: 'seed' }), fallback, kind, clock).allowed, false, `${label}: seed claiming verified_free`);
+      assert.equal(evaluateModel(row({ verificationSource: 'seed', pricingStatus: 'paid', inputPrice: 3, outputPrice: 15 }), fallback, kind, clock).allowed, false, `${label}: seed paid`);
+      assert.equal(evaluateModel(row({ verificationSource: 'seed', lastVerifiedAt: null }), fallback, kind, clock).allowed, false, `${label}: seed no timestamp`);
+      // Stale: aged trusted verification, or explicitly stale status.
+      assert.equal(evaluateModel(row({ lastVerifiedAt: HOURS(73) }), fallback, kind, clock).allowed, false, `${label}: aged free`);
+      assert.equal(evaluateModel(row({ pricingStatus: 'paid', inputPrice: 3, outputPrice: 15, lastVerifiedAt: HOURS(73) }), fallback, kind, clock).allowed, false, `${label}: aged paid`);
+      assert.equal(evaluateModel(row({ pricingStatus: 'stale' }), fallback, kind, clock).allowed, false, `${label}: stale status`);
+      assert.equal(evaluateModel(row({ lastVerifiedAt: null }), fallback, kind, clock).allowed, false, `${label}: trusted without timestamp`);
+      // Unknown and unregistered.
+      assert.equal(evaluateModel(row({ pricingStatus: 'unknown', inputPrice: null, outputPrice: null }), fallback, kind, clock).allowed, false, `${label}: unknown`);
+      assert.equal(evaluateModel(null, fallback, kind, clock).allowed, false, `${label}: unregistered`);
+      // ":free" label with non-zero verified price.
+      assert.equal(evaluateModel(row({ outputPrice: 0.5 }), fallback, kind, clock).allowed, false, `${label}: free label, non-zero price`);
+      // Paid: only with explicit fallback.
+      assert.equal(evaluateModel(row({ pricingStatus: 'paid', inputPrice: 3, outputPrice: 15 }), fallback, kind, clock).allowed, fallback, `${label}: fresh trusted paid`);
+    }
   }
+  assert.equal(effectivePricingStatus(row({ verificationSource: 'seed' }), clock), 'unknown');
+  assert.equal(effectivePricingStatus(row({ lastVerifiedAt: HOURS(73) }), clock), 'stale');
+  assert.equal(effectivePricingStatus(row({ lastVerifiedAt: HOURS(71) }), clock), 'verified_free');
+});
+
+test('seeded registry rows are rejected at agent creation even with paid fallback enabled', async () => {
+  const W = await seedWorkspace(t, 'seeded');
+  const base = `/api/v1/tenants/${W.tenantId}`;
+  for (const fallback of [false, true]) {
+    await call(t, 'PUT', `${base}/model-policy`, { session: W.owner, payload: { allowPaidFallback: fallback } });
+    for (const modelId of [SEEDED_FREE_MODEL, SEEDED_PAID_MODEL, SEEDED_UNKNOWN_MODEL]) {
+      const res = await call(t, 'POST', `${base}/agents`, { session: W.owner, payload: { name: 'x', providerConnectionId: W.providerConnectionId, modelId } });
+      assert.equal(res.statusCode, 409, `${modelId} fallback=${fallback}`);
+      assert.equal(res.json().error.code, 'model_not_allowed');
+    }
+  }
+  const seededFree = await call(t, 'POST', `${base}/agents`, { session: W.owner, payload: { name: 'x', providerConnectionId: W.providerConnectionId, modelId: SEEDED_FREE_MODEL } });
+  assert.match(seededFree.json().error.message, /trusted verification/);
 });
 
 test('paid fallback is OFF by default and blocks paid/unknown models at agent creation and every task type', async () => {
@@ -54,26 +93,54 @@ test('paid fallback is OFF by default and blocks paid/unknown models at agent cr
   assert.ok(t.adapter.submissions.every((s) => s.modelId === FREE_MODEL), 'no paid model ever reached the adapter');
 
   const audit = (await call(t, 'GET', `${base}/audit-events`, { session: W.owner })).json().data;
-  const policyChanges = audit.filter((e: { action: string }) => e.action === 'model_policy.updated');
-  assert.equal(policyChanges.length, 2, 'every policy flip is audited');
+  assert.equal(audit.filter((e: { action: string }) => e.action === 'model_policy.updated').length, 2, 'every policy flip is audited');
   const tasks = (await call(t, 'GET', `${base}/tasks`, { session: W.owner })).json().data;
   assert.ok(tasks.every((x: { agentId: string }) => x.agentId !== paidAgent.id), 'blocked submissions create no task row');
 });
 
-test('/models reports allowed flags from the policy and never invents usage balances', async () => {
+test('a verification that goes stale blocks an existing agent at submit time; re-verification restores it', async () => {
+  const W = await seedWorkspace(t, 'stale');
+  const pool = getPool();
+  await pool.query(`UPDATE models SET last_verified_at = now() - interval '73 hours' WHERE model_id = $1`, [FREE_MODEL]);
+  const blocked = await submitTask(t, W.owner, W.tenantId, W.agentId, 'stale-1');
+  assert.equal(blocked.statusCode, 409); assert.match(blocked.json().error.message, /stale/);
+  const listed = (await call(t, 'GET', `/api/v1/tenants/${W.tenantId}/models`, { session: W.owner })).json().data.find((m: { modelId: string }) => m.modelId === FREE_MODEL);
+  assert.equal(listed.pricingStatus, 'stale'); assert.equal(listed.allowed, false);
+
+  const client = await pool.connect();
+  try {
+    await recordTrustedVerification(client, { provider: 'openrouter', modelId: FREE_MODEL, displayName: 'Test verified free', pricingStatus: 'verified_free', inputPrice: 0, outputPrice: 0 });
+  } finally { client.release(); }
+  assert.equal((await submitTask(t, W.owner, W.tenantId, W.agentId, 'stale-2')).statusCode, 202);
+});
+
+test('/models reports effective status, hides unverified prices, and never invents usage balances', async () => {
   const W = await seedWorkspace(t, 'models');
   const base = `/api/v1/tenants/${W.tenantId}`;
-  const models = (await call(t, 'GET', `${base}/models`, { session: W.owner })).json().data;
-  const byId = Object.fromEntries(models.map((m: { modelId: string }) => [m.modelId, m]));
-  assert.equal(byId[FREE_MODEL].allowed, true); assert.equal(byId[FREE_MODEL].pricingStatus, 'verified_free');
-  assert.equal(byId[PAID_MODEL].allowed, false); assert.equal(byId[PAID_MODEL].pricingStatus, 'paid');
-  assert.equal(byId[UNKNOWN_MODEL].allowed, false); assert.equal(byId[UNKNOWN_MODEL].lastVerifiedAt, null);
-  assert.ok(models.every((m: { usage: unknown }) => m.usage === null), 'no usage integration => null, never a made-up number');
+  const byId = async () => Object.fromEntries((await call(t, 'GET', `${base}/models`, { session: W.owner })).json().data.map((m: { modelId: string }) => [m.modelId, m]));
+  const m = await byId();
+  assert.deepEqual(
+    { s: m[FREE_MODEL].pricingStatus, v: m[FREE_MODEL].verificationSource, a: m[FREE_MODEL].allowed, i: m[FREE_MODEL].inputPricePerMillionTokensUsd },
+    { s: 'verified_free', v: 'trusted', a: true, i: 0 },
+  );
+  assert.equal(m[PAID_MODEL].pricingStatus, 'paid'); assert.equal(m[PAID_MODEL].allowed, false);
+  assert.equal(m[UNKNOWN_MODEL].pricingStatus, 'unknown'); assert.equal(m[UNKNOWN_MODEL].allowed, false);
+  for (const id of [SEEDED_FREE_MODEL, SEEDED_PAID_MODEL, SEEDED_UNKNOWN_MODEL]) {
+    assert.equal(m[id].verificationSource, 'seed', id);
+    assert.equal(m[id].pricingStatus, 'unknown', `${id}: a seed row's stored claim is never reported as fact`);
+    assert.equal(m[id].allowed, false, id);
+    assert.equal(m[id].inputPricePerMillionTokensUsd, null, id);
+    assert.equal(m[id].outputPricePerMillionTokensUsd, null, id);
+    assert.equal(m[id].lastVerifiedAt, null, id);
+  }
+  assert.ok(Object.values(m).every((x) => (x as { usage: unknown }).usage === null), 'no usage integration => null, never a made-up number');
 
   await call(t, 'PUT', `${base}/model-policy`, { session: W.owner, payload: { allowPaidFallback: true } });
-  const after = (await call(t, 'GET', `${base}/models`, { session: W.owner })).json().data;
-  const after2 = Object.fromEntries(after.map((m: { modelId: string }) => [m.modelId, m]));
-  assert.equal(after2[PAID_MODEL].allowed, true); assert.equal(after2[UNKNOWN_MODEL].allowed, false);
+  const after = await byId();
+  assert.equal(after[PAID_MODEL].allowed, true);
+  assert.equal(after[UNKNOWN_MODEL].allowed, false);
+  assert.equal(after[SEEDED_PAID_MODEL].allowed, false, 'paid fallback does not unlock an unverified paid row');
+  assert.equal(after[SEEDED_FREE_MODEL].allowed, false);
 });
 
 test('a tenant with no model_policies row is treated as paid fallback OFF (default-deny on missing config)', async () => {
