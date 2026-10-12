@@ -1,0 +1,48 @@
+{
+  "decide_request_approve": { "decision": "approve" },
+  "decide_request_reject": { "decision": "reject", "reason": "Not authorized for this website." },
+  "approval_pending": {
+    "id": "99999999-9999-4999-8999-999999999991",
+    "tenantId": "44444444-4444-4444-8444-444444444444",
+    "taskId": "88888888-8888-4888-8888-888888888882",
+    "action": "task.execute",
+    "payloadDigest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+    "status": "pending",
+    "decidedBy": null,
+    "decidedAt": null,
+    "reason": null,
+    "expiresAt": "2026-10-05T10:05:00Z",
+    "createdAt": "2026-10-05T09:05:00Z"
+  },
+  "approval_approved": {
+    "id": "99999999-9999-4999-8999-999999999991",
+    "tenantId": "44444444-4444-4444-8444-444444444444",
+    "taskId": "88888888-8888-4888-8888-888888888882",
+    "action": "task.execute",
+    "payloadDigest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+    "status": "approved",
+    "decidedBy": "22222222-2222-4222-8222-222222222222",
+    "decidedAt": "2026-10-05T09:06:00Z",
+    "reason": null,
+    "expiresAt": "2026-10-05T10:05:00Z",
+    "createdAt": "2026-10-05T09:05:00Z"
+  },
+  "list_response": {
+    "data": [
+      {
+        "id": "99999999-9999-4999-8999-999999999991",
+        "tenantId": "44444444-4444-4444-8444-444444444444",
+        "taskId": "88888888-8888-4888-8888-888888888882",
+        "action": "task.execute",
+        "payloadDigest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+        "status": "pending",
+        "decidedBy": null,
+        "decidedAt": null,
+        "reason": null,
+        "expiresAt": "2026-10-05T10:05:00Z",
+        "createdAt": "2026-10-05T09:05:00Z"
+      }
+    ],
+    "page": { "nextCursor": null }
+  }
+}

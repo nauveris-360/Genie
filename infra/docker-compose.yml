@@ -1,0 +1,62 @@
+# Reviewable local composition for the Genie API + PostgreSQL. NOT a deployment
+# manifest: the production target (VPS 2 via Coolify, hostname/TLS chosen with
+# the owner, off-server backups) is a separate, approved step. All secrets come
+# from the shell/orchestrator environment; the placeholders below fail loudly
+# if left unset. The database is never published outside the compose network.
+
+services:
+  db:
+    image: postgres:16.6-bookworm
+    environment:
+      POSTGRES_DB: genie
+      POSTGRES_USER: genie
+      POSTGRES_PASSWORD: ${GENIE_DB_PASSWORD:?set GENIE_DB_PASSWORD}
+    volumes:
+      - genie-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U genie -d genie"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g }
+    networks: [genie-internal]
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      HOST: 0.0.0.0
+      DATABASE_URL: postgres://genie:${GENIE_DB_PASSWORD:?set GENIE_DB_PASSWORD}@db:5432/genie
+      DATABASE_SSL: "false"
+      DATABASE_POOL_MAX: "10"
+      SESSION_COOKIE_NAME: genie_sid
+      SESSION_COOKIE_SECRET: ${GENIE_SESSION_COOKIE_SECRET:?set GENIE_SESSION_COOKIE_SECRET}
+      SESSION_TTL_MINUTES: "720"
+      CSRF_COOKIE_NAME: genie_csrf
+      ALLOWED_ORIGINS: ${GENIE_ALLOWED_ORIGINS:?set GENIE_ALLOWED_ORIGINS, e.g. https://app.example.com}
+      CREDENTIAL_ENCRYPTION_KEY: ${GENIE_CREDENTIAL_ENCRYPTION_KEY:?set GENIE_CREDENTIAL_ENCRYPTION_KEY}
+      DEFAULT_ALLOW_PAID_FALLBACK: "false"
+      HERMES_ENABLED: "false"
+    ports:
+      - "127.0.0.1:4000:4000"   # loopback only; a reverse proxy terminates TLS and exposes approved routes
+    read_only: true
+    tmpfs: [/tmp]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m }
+    networks: [genie-internal]
+
+volumes:
+  genie-db:
+
+networks:
+  genie-internal:
+    internal: false   # api needs egress only for provider calls once an adapter exists; db has no published port

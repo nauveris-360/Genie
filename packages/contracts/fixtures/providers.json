@@ -1,0 +1,26 @@
+{
+  "save_request": { "provider": "openrouter", "label": "Primary OpenRouter key", "credential": "sk-or-REDACTED-EXAMPLE-ONLY" },
+  "provider_connection": {
+    "id": "66666666-6666-4666-8666-666666666661",
+    "tenantId": "44444444-4444-4444-8444-444444444444",
+    "provider": "openrouter",
+    "label": "Primary OpenRouter key",
+    "credentialStatus": "present",
+    "createdAt": "2026-10-02T12:00:00Z",
+    "updatedAt": "2026-10-02T12:00:00Z"
+  },
+  "list_response": {
+    "data": [
+      {
+        "id": "66666666-6666-4666-8666-666666666661",
+        "tenantId": "44444444-4444-4444-8444-444444444444",
+        "provider": "openrouter",
+        "label": "Primary OpenRouter key",
+        "credentialStatus": "present",
+        "createdAt": "2026-10-02T12:00:00Z",
+        "updatedAt": "2026-10-02T12:00:00Z"
+      }
+    ],
+    "page": { "nextCursor": null }
+  }
+}

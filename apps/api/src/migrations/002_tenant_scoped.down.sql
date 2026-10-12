@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS approvals;
+DROP TABLE IF EXISTS tasks;
+DROP TABLE IF EXISTS models;
+DROP TABLE IF EXISTS model_policies;
+DROP TRIGGER IF EXISTS agents_provider_same_tenant ON agents;
+DROP FUNCTION IF EXISTS assert_agent_provider_same_tenant();
+DROP TABLE IF EXISTS agents;
+DROP TABLE IF EXISTS provider_connections;
+DROP TABLE IF EXISTS websites;

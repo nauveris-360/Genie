@@ -1,0 +1,21 @@
+{
+  "live_response": { "data": { "status": "ok" } },
+  "ready_response_ok": {
+    "data": {
+      "status": "ok",
+      "checks": {
+        "database": { "status": "ok" },
+        "agentAdapter": { "status": "ok", "detail": "mock adapter active" }
+      }
+    }
+  },
+  "ready_response_degraded": {
+    "data": {
+      "status": "degraded",
+      "checks": {
+        "database": { "status": "ok" },
+        "agentAdapter": { "status": "unavailable", "detail": "Hermes programmatic interface not configured; set HERMES_ENABLED and verify adapter contract with Codex before enabling." }
+      }
+    }
+  }
+}

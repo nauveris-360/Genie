@@ -1,0 +1,10 @@
+extends:
+  - recommended
+rules:
+  # /health/live and /health/ready are unauthenticated probes with no client
+  # input; they intentionally have no 4XX responses. Every other operation in
+  # this contract documents its 4XX cases explicitly.
+  operation-4xx-response: off
+  # Licensing of this private repository is the owner's decision and has not
+  # been made; the contract does not invent one.
+  info-license: off

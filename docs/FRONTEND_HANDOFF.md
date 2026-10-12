@@ -1,0 +1,186 @@
+# Genie V3 API v1 — frontend integration handoff
+
+For AI Studio (apps/web) and Codex reconciliation. Source of truth is
+`packages/contracts/openapi.yaml`; the TypeScript mirror is
+`packages/contracts/src/{types,permissions}.ts` (`@genie/contracts`), and safe
+example payloads for every endpoint are in `packages/contracts/fixtures/*.json`.
+If this page and the YAML ever disagree, the YAML wins — tell us.
+
+Status: backend implemented and integration-tested against PostgreSQL 16 with a
+**mock** agent adapter. Hermes is **not** integrated (readiness reports it
+`unavailable`); n8n execution, provider usage/quota figures, email, voice, SEO,
+publishing and billing are not implemented. Nothing is deployed.
+
+## Transport conventions
+
+| Thing | Value |
+| --- | --- |
+| Base path | `/api/v1` (same origin as the API; no public host published) |
+| IDs | UUID v4 strings |
+| Timestamps | UTC ISO-8601 with `Z` (`2026-10-12T03:00:00.000Z`) |
+| Single resource | `{ "data": <resource> }` |
+| List | `{ "data": [...], "page": { "nextCursor": string \| null } }` |
+| Error | `{ "error": { "code": string, "message": string, "requestId": uuid } }` — never a stack trace |
+| Task submit success | `202` with the **full persisted Task** in `data` |
+| Create success | `201`; other writes `200` |
+
+### Pagination
+Query `?limit=1..100` (default 20) and `?cursor=<opaque>` taken verbatim from
+the previous `page.nextCursor`. Lists are newest-first and stable under inserts.
+An invalid `cursor`/`limit` → `400 validation_error`. Tasks and approvals also
+accept `?status=<enum>`.
+
+### Auth: cookies, CSRF, Origin
+* Session cookie `genie_sid` — HttpOnly, SameSite=Lax, Secure in production,
+  Path=/. Opaque; the server stores only a hash. **Never read or store it in JS.**
+* CSRF cookie `genie_csrf` — same attributes but **not** HttpOnly so the SPA can
+  read it. Send its value as header `X-CSRF-Token` on every `POST/PUT/PATCH/DELETE`
+  except `POST /auth/login`. Missing/mismatched → `403 csrf_mismatch`.
+* **Origin**: every state-changing request, *including login*, must carry an
+  `Origin` (browsers do this automatically for `fetch`) whose value is in the
+  server's `ALLOWED_ORIGINS` allowlist; otherwise `403 forbidden` ("Request origin
+  is not trusted"). `Referer` is accepted as a fallback. This is the login-CSRF
+  defense. Use `fetch(..., { credentials: 'include' })`.
+* Logout clears both cookies and deletes the server session. Sessions survive
+  API restarts (they are DB rows). `401 unauthorized` means "sign in"; after a
+  `401` on `/auth/me` treat the user as signed out.
+* No tokens in `localStorage`/`sessionStorage`, ever.
+
+## Permission matrix (server-enforced; UI gating is cosmetic)
+
+The role comes from the caller's **membership row for the `tenantId` in the URL**.
+No membership → `404 not_found` (indistinguishable from a missing tenant). Wrong
+role → `403 forbidden`. Any signed-in user may `POST /tenants` and becomes its owner.
+
+| Permission | owner | admin | operator | viewer | Endpoints |
+| --- | :-: | :-: | :-: | :-: | --- |
+| tenant:read | ✓ | ✓ | ✓ | ✓ | `GET /tenants`, `GET /auth/me` |
+| website:read | ✓ | ✓ | ✓ | ✓ | `GET …/websites` |
+| website:write | ✓ | ✓ | ✓ | – | `POST …/websites`, `PATCH …/websites/{id}` |
+| agent:read | ✓ | ✓ | ✓ | ✓ | `GET …/agents` |
+| agent:write | ✓ | ✓ | ✓ | – | `POST …/agents`, `PATCH …/agents/{id}` |
+| provider:read | ✓ | ✓ | ✓ | ✓ | `GET …/providers` (metadata only) |
+| provider:write | ✓ | ✓ | – | – | `POST …/providers` |
+| modelPolicy:read | ✓ | ✓ | ✓ | ✓ | `GET …/model-policy`, `GET …/models` |
+| modelPolicy:write | ✓ | ✓ | – | – | `PUT …/model-policy` |
+| task:read | ✓ | ✓ | ✓ | ✓ | `GET …/tasks`, `GET …/tasks/{id}` |
+| task:submit | ✓ | ✓ | ✓ | – | `POST …/tasks` |
+| task:cancel | ✓ | ✓ | ✓ | – | `POST …/tasks/{id}/cancel` |
+| approval:read | ✓ | ✓ | ✓ | ✓ | `GET …/approvals` |
+| approval:decide | ✓ | ✓ | – | – | `POST …/approvals/{id}/decision` |
+| auditEvent:read | ✓ | ✓ | ✓ | ✓ | `GET …/audit-events` |
+
+`…` = `/tenants/{tenantId}`. Import `PERMISSION_ROLES` / `roleHasPermission`
+from `@genie/contracts` to drive UI affordances; the backend re-checks regardless.
+There is **no** membership-management endpoint in v1 (owner bootstrap is a
+private CLI); show members as read-only from `/auth/me` for now.
+
+## Entities (exact response fields)
+
+```ts
+User        { id, email, displayName, createdAt }
+Membership  { id, tenantId, tenantName, role, createdAt }
+AuthMe      { user: User, memberships: Membership[] }
+Tenant      { id, name, slug, role, createdAt, updatedAt }            // role = caller's role
+Website     { id, tenantId, label, url, status: 'active'|'archived', createdAt, updatedAt }
+Agent       { id, tenantId, name, description: string|null, status: 'active'|'disabled',
+              providerConnectionId, modelId, requiresApproval: boolean, config: object,
+              createdAt, updatedAt }
+ProviderConnection { id, tenantId, provider: 'openrouter'|'gemini', label,
+              credentialStatus: 'present'|'missing', createdAt, updatedAt }   // never the credential
+Model       { modelId, provider, displayName, pricingStatus: 'verified_free'|'paid'|'unknown'|'stale',
+              allowed: boolean, inputPricePerMillionTokensUsd: number|null,
+              outputPricePerMillionTokensUsd: number|null, lastVerifiedAt: string|null,
+              usage: { metric:'tokens'|'requests', used, limit:number|null, isEstimate } | null }
+ModelPolicy { tenantId, allowPaidFallback: boolean, updatedAt, updatedBy: uuid|null }
+Task        { id, tenantId, websiteId: uuid|null, agentId,
+              type: 'chat'|'summarize'|'embed'|'title_generate',
+              status: 'queued'|'running'|'awaiting_approval'|'succeeded'|'failed'|'cancelled',
+              input: object, result: object|null, error: string|null, idempotencyKey,
+              approvalId: uuid|null, createdBy, createdAt, updatedAt }
+Approval    { id, tenantId, taskId, action: 'task.execute', payloadDigest: sha256hex,
+              status: 'pending'|'approved'|'rejected'|'expired', decidedBy: uuid|null,
+              decidedAt: string|null, reason: string|null, expiresAt, createdAt }
+AuditEvent  { id, tenantId, actorUserId: uuid|null, action, targetType, targetId, metadata: object, createdAt }
+Readiness   { data: { status:'ok'|'degraded', checks: { database: {status, detail?}, agentAdapter: {status, detail?} } } }
+```
+
+`usage` is currently always `null` — there is no provider usage integration.
+Do not render a remaining balance; render "not reported".
+
+## Request payloads
+
+| Call | Body / headers |
+| --- | --- |
+| `POST /auth/login` | `{ email, password }` → 200 `AuthMe` + both cookies. 401 `invalid_credentials` (same message for unknown email and bad password). |
+| `POST /auth/logout` | none |
+| `POST /tenants` | `{ name }` (1–200) |
+| `POST …/websites` | `{ label, url }` (url must be absolute) |
+| `PATCH …/websites/{id}` | any of `{ label, url, status }`, ≥1 field |
+| `POST …/agents` | `{ name, providerConnectionId, modelId, description?, requiresApproval? = true, config? }` |
+| `PATCH …/agents/{id}` | any of `{ name, description, status, providerConnectionId, modelId, requiresApproval, config }` |
+| `POST …/providers` | `{ provider, label, credential }` — `credential` is write-only; 201 returns metadata only. Only on an explicit user action; never prefilled. |
+| `PUT …/model-policy` | `{ allowPaidFallback }` — enabling is an explicit, audited owner/admin act. |
+| `POST …/tasks` | header **`Idempotency-Key`** (required, 1–200 chars; generate a UUID per user intent and reuse it on retry) + `{ agentId, type, input: object, websiteId? }` |
+| `POST …/tasks/{id}/cancel` | none |
+| `POST …/approvals/{id}/decision` | `{ decision: 'approve'\|'reject', reason? }` |
+
+## Error codes to handle
+
+`validation_error`(400) · `unauthorized`(401) · `invalid_credentials`(401) ·
+`forbidden`(403, also untrusted Origin) · `csrf_mismatch`(403) · `not_found`(404) ·
+`idempotency_key_conflict`(409) · `model_not_allowed`(409) · `approval_expired`(409) ·
+`approval_payload_mismatch`(409) · `approval_already_decided`(409) ·
+`task_not_cancellable`(409) · `rate_limited`(429) · `internal_error`(500).
+Always surface `requestId` in error UI.
+
+## Task & approval semantics
+
+1. `POST …/tasks` validates agent ∈ tenant, website ∈ tenant, and the agent's
+   `modelId` against the tenant's **free-first policy at submit time** (every
+   `type`, including `embed`/`title_generate`/`summarize`). Disallowed → `409
+   model_not_allowed`, no task row is created.
+2. Same `Idempotency-Key` + identical body → `202` with the **original** task
+   (same `id`); same key + different body → `409 idempotency_key_conflict`.
+3. If `agent.requiresApproval` is `true` (default), the task is persisted as
+   `awaiting_approval` with `approvalId` set and a `pending` Approval bound to a
+   SHA-256 digest of `{tenantId, agentId, type, input, websiteId}` and a
+   60-minute `expiresAt`. Nothing reaches the model before approval.
+4. If `requiresApproval` is `false`, the task runs synchronously through the
+   adapter inside the same request; the 202 body already shows the final status
+   (`succeeded`/`failed`). With the real Hermes adapter not integrated, a
+   production-configured API returns `failed` with a visible error, never a fake
+   result. **Poll `GET …/tasks/{id}` anyway** — the contract allows `queued`/`running`.
+5. Approve → decision recorded (immutable, `decidedBy/At` set) → task runs →
+   `succeeded`/`failed`. Reject → task `cancelled`, `error = "rejected: <reason>"`.
+6. Replay of a decided approval → `409 approval_already_decided`. Any change to
+   the task payload after creation → `409 approval_payload_mismatch` (approval
+   stays `pending`, task stays `awaiting_approval`). Past `expiresAt` → `409
+   approval_expired` and the row flips to `expired`.
+7. Cancel is allowed from `queued`/`running`/`awaiting_approval` (expires any
+   pending approval) and is idempotent on `cancelled`; on `succeeded`/`failed` → `409`.
+8. Every action above writes an AuditEvent (`task.submitted`, `approval.requested`,
+   `approval.decided`, `approval.expired`, `task.succeeded|failed|cancelled`,
+   `provider.credential_saved`, `model_policy.updated`, `website.*`, `agent.*`,
+   `tenant.created`). Metadata is redacted server-side.
+
+## Free-first policy (what the UI should expect)
+
+`allowPaidFallback` defaults to **false** per tenant and is never flipped by
+the backend. `GET …/models` returns the registry with `allowed` computed for the
+tenant: only `verified_free` with verified **zero** input and output price is
+allowed by default; `paid` becomes allowed only after an owner/admin sets
+`allowPaidFallback: true`; `unknown`/`stale` are **never** allowed, even then.
+The `:free` suffix is not trusted on its own. The registry currently holds
+placeholder entries pending a real pricing-verification job.
+
+## Health
+`GET /health/live` → `200 {data:{status:'ok'}}`. `GET /health/ready` → `200` or
+`503 degraded` with per-dependency `checks`; today `agentAdapter` is
+`unavailable` until Codex verifies a Hermes programmatic interface. Show that
+state honestly in Integrations/Overview; do not label execution as available.
+
+## Demo mode
+Keep demo fixtures isolated and labelled; never accept a credential in demo
+mode. In real mode call these endpoints only; where a capability is not
+implemented (usage, Hermes execution, n8n), show it as unavailable.

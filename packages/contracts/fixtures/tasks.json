@@ -1,0 +1,76 @@
+{
+  "create_request": {
+    "agentId": "77777777-7777-4777-8777-777777777771",
+    "type": "chat",
+    "input": { "prompt": "Draft a one-paragraph reply to this support ticket." }
+  },
+  "task_queued": {
+    "id": "88888888-8888-4888-8888-888888888881",
+    "tenantId": "44444444-4444-4444-8444-444444444444",
+    "websiteId": null,
+    "agentId": "77777777-7777-4777-8777-777777777771",
+    "type": "chat",
+    "status": "queued",
+    "input": { "prompt": "Draft a one-paragraph reply to this support ticket." },
+    "result": null,
+    "error": null,
+    "idempotencyKey": "client-generated-key-001",
+    "approvalId": null,
+    "createdBy": "22222222-2222-4222-8222-222222222222",
+    "createdAt": "2026-10-05T09:00:00Z",
+    "updatedAt": "2026-10-05T09:00:00Z"
+  },
+  "task_awaiting_approval": {
+    "id": "88888888-8888-4888-8888-888888888882",
+    "tenantId": "44444444-4444-4444-8444-444444444444",
+    "websiteId": null,
+    "agentId": "77777777-7777-4777-8777-777777777771",
+    "type": "chat",
+    "status": "awaiting_approval",
+    "input": { "prompt": "Post this reply to the live ticket." },
+    "result": null,
+    "error": null,
+    "idempotencyKey": "client-generated-key-002",
+    "approvalId": "99999999-9999-4999-8999-999999999991",
+    "createdBy": "22222222-2222-4222-8222-222222222222",
+    "createdAt": "2026-10-05T09:05:00Z",
+    "updatedAt": "2026-10-05T09:05:00Z"
+  },
+  "task_succeeded": {
+    "id": "88888888-8888-4888-8888-888888888883",
+    "tenantId": "44444444-4444-4444-8444-444444444444",
+    "websiteId": null,
+    "agentId": "77777777-7777-4777-8777-777777777771",
+    "type": "chat",
+    "status": "succeeded",
+    "input": { "prompt": "Draft a one-paragraph reply to this support ticket." },
+    "result": { "text": "Thanks for reaching out - here is a draft reply..." },
+    "error": null,
+    "idempotencyKey": "client-generated-key-001",
+    "approvalId": null,
+    "createdBy": "22222222-2222-4222-8222-222222222222",
+    "createdAt": "2026-10-05T09:00:00Z",
+    "updatedAt": "2026-10-05T09:00:05Z"
+  },
+  "list_response": {
+    "data": [
+      {
+        "id": "88888888-8888-4888-8888-888888888883",
+        "tenantId": "44444444-4444-4444-8444-444444444444",
+        "websiteId": null,
+        "agentId": "77777777-7777-4777-8777-777777777771",
+        "type": "chat",
+        "status": "succeeded",
+        "input": { "prompt": "Draft a one-paragraph reply to this support ticket." },
+        "result": { "text": "Thanks for reaching out - here is a draft reply..." },
+        "error": null,
+        "idempotencyKey": "client-generated-key-001",
+        "approvalId": null,
+        "createdBy": "22222222-2222-4222-8222-222222222222",
+        "createdAt": "2026-10-05T09:00:00Z",
+        "updatedAt": "2026-10-05T09:00:05Z"
+      }
+    ],
+    "page": { "nextCursor": null }
+  }
+}

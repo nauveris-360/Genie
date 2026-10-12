@@ -1,0 +1,1322 @@
+openapi: 3.1.0
+info:
+  title: Genie V3 API
+  version: 1.0.0
+  description: |
+    Genie V3 control-plane API. Authoritative contract for apps/api (Fastify/TypeScript)
+    and the AI Studio frontend. Hermes supplies reasoning via a backend-mediated adapter;
+    Genie supplies authentication, tenant isolation, policy enforcement, task persistence
+    and audit history. This is the v1 contract for the first vertical-slice milestone
+    described in BUILD-SPEC.md: sign in, create a workspace/website, configure an agent
+    and provider, submit a text task, see persisted status and audit history, and enforce
+    approval for consequential actions.
+
+    Conventions:
+    - All identifiers are UUIDs (string, format uuid).
+    - All timestamps are UTC ISO-8601 (string, format date-time), e.g. "2026-10-12T03:00:00Z".
+    - Successful single-resource responses: { "data": <resource> }.
+    - Successful list responses: { "data": [<resource>, ...], "page": { "nextCursor": string|null } }.
+    - Errors: { "error": { "code": string, "message": string, "requestId": string } }. Stack
+      traces and internal details are never exposed.
+    - A 202 response to a task submission contains the full persisted task record, not a
+      synthetic acknowledgement.
+    - Authentication is an opaque, server-side session referenced by a Secure, HttpOnly,
+      SameSite cookie (see `cookieAuth`). State-changing requests additionally require a
+      CSRF header matching the non-HttpOnly CSRF cookie issued at login (see `csrfHeader`).
+    - Every `/tenants/{tenantId}/...` route re-checks the caller's membership and role for
+      that specific tenantId server-side; a tenantId in the URL is never trusted on its own.
+
+servers:
+  - url: /api/v1
+    description: Relative to the deployed Genie API origin. No public server is published by this contract.
+
+security:
+  - cookieAuth: []
+
+tags:
+  - name: Auth
+    description: Opaque cookie sessions, CSRF issuance and the current user's memberships.
+  - name: Tenants
+    description: Workspaces. Listing is restricted to tenants the caller is a member of; creating one makes the caller its owner.
+  - name: Websites
+    description: Websites registered to a tenant; dynamically created, never compiled into the UI.
+  - name: Agents
+    description: Per-tenant agent configurations bound to a provider connection and a policy-checked model.
+  - name: Providers
+    description: Provider connections. Credentials are write-only and encrypted at rest; only presence metadata is ever returned.
+  - name: Models
+    description: Model registry as seen through the tenant's free-first policy, with verified pricing status.
+  - name: ModelPolicy
+    description: Per-tenant free-first policy. Paid fallback is off by default and only an owner/admin may enable it.
+  - name: Tasks
+    description: Idempotent task submission, persisted lifecycle state and safe results.
+  - name: Approvals
+    description: Immutable approval decisions bound to tenant, action, payload digest and expiry.
+  - name: AuditEvents
+    description: Append-only, redacted audit trail per tenant.
+  - name: Health
+    description: Liveness and honest dependency readiness (no synthetic success).
+
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Create a session
+      description: |
+        Verifies email + password against stored password hashes and, on success, creates an
+        opaque server-side session row and sets the session cookie and a paired CSRF cookie.
+        No CSRF header is required on this request (no session exists yet). Rate limiting and
+        generic failure messages (no "email not found" vs "bad password" distinction) are
+        enforced server-side.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              default:
+                value: { email: "owner@example.com", password: "correct-horse-battery-staple" }
+      responses:
+        '200':
+          description: Session created.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+              description: Session cookie and CSRF cookie (two Set-Cookie headers).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/AuthMe'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Invalid credentials.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+              examples:
+                default:
+                  value: { error: { code: "invalid_credentials", message: "Email or password is incorrect.", requestId: "11111111-1111-4111-8111-111111111111" } }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Invalidate the current session
+      description: Deletes the server-side session row and clears both cookies. Idempotent.
+      responses:
+        '200':
+          description: Session invalidated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [success]
+                    properties:
+                      success: { type: boolean, const: true }
+              examples:
+                default:
+                  value: { data: { success: true } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      operationId: getMe
+      summary: Current user and memberships
+      responses:
+        '200':
+          description: Authenticated user and their tenant memberships.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AuthMe' }
+              examples:
+                default:
+                  value:
+                    data:
+                      user: { id: "22222222-2222-4222-8222-222222222222", email: "owner@example.com", displayName: "Owner", createdAt: "2026-10-01T00:00:00Z" }
+                      memberships:
+                        - { id: "33333333-3333-4333-8333-333333333333", tenantId: "44444444-4444-4444-8444-444444444444", tenantName: "Acme Co", role: "owner", createdAt: "2026-10-01T00:00:00Z" }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /tenants:
+    get:
+      tags: [Tenants]
+      operationId: listTenants
+      summary: List tenants the caller is a member of
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Tenants the caller has membership in. Never includes tenants the caller cannot access.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantListResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Tenants]
+      operationId: createTenant
+      summary: Create a tenant
+      description: Creates a new tenant and makes the caller its owner via a new membership row.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTenantRequest' }
+            examples:
+              default:
+                value: { name: "Acme Co" }
+      responses:
+        '201':
+          description: Tenant created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Tenant' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CsrfRequired'
+
+  /tenants/{tenantId}/websites:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [Websites]
+      operationId: listWebsites
+      summary: List websites for a tenant
+      description: Requires any membership role (owner/admin/operator/viewer) in tenantId.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Websites registered for the tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebsiteListResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/TenantNotFound'
+    post:
+      tags: [Websites]
+      operationId: registerWebsite
+      summary: Register a website
+      description: Requires role owner, admin or operator. Viewer is forbidden.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateWebsiteRequest' }
+            examples:
+              default:
+                value: { label: "Marketing site", url: "https://example.com" }
+      responses:
+        '201':
+          description: Website registered.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Website' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /tenants/{tenantId}/websites/{websiteId}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/WebsiteId'
+    patch:
+      tags: [Websites]
+      operationId: updateWebsite
+      summary: Edit or archive a website
+      description: Requires role owner, admin or operator. Viewer is forbidden.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateWebsiteRequest' }
+            examples:
+              archive:
+                value: { status: "archived" }
+      responses:
+        '200':
+          description: Website updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Website' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Website not found in this tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /tenants/{tenantId}/agents:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [Agents]
+      operationId: listAgents
+      summary: List agents for a tenant
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Agents configured for the tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentListResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Agents]
+      operationId: createAgent
+      summary: Create an agent
+      description: |
+        Requires role owner, admin or operator. The chosen modelId is validated against the
+        tenant's free-first model policy at creation time and re-validated on every task
+        submission (policy can tighten after the agent is created).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAgentRequest' }
+            examples:
+              default:
+                value: { name: "Support drafter", providerConnectionId: "55555555-5555-4555-8555-555555555555", modelId: "openrouter/some-model:free", config: {} }
+      responses:
+        '201':
+          description: Agent created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Agent' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Chosen model is not allowed under the tenant's free-first policy.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+              examples:
+                default:
+                  value: { error: { code: "model_not_allowed", message: "Model is not on the verified free allowlist and paid fallback is disabled for this tenant.", requestId: "66666666-6666-4666-8666-666666666666" } }
+
+  /tenants/{tenantId}/agents/{agentId}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AgentId'
+    patch:
+      tags: [Agents]
+      operationId: updateAgent
+      summary: Update agent configuration
+      description: Requires role owner, admin or operator. Viewer is forbidden.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateAgentRequest' }
+      responses:
+        '200':
+          description: Agent updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Agent' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Agent not found in this tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Chosen model is not allowed under the tenant's free-first policy.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /tenants/{tenantId}/providers:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [Providers]
+      operationId: listProviderConnections
+      summary: List provider connection metadata
+      description: Never returns credential material, only presence/validity metadata.
+      responses:
+        '200':
+          description: Provider connections for the tenant (metadata only).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProviderConnectionListResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Providers]
+      operationId: saveProviderConnection
+      summary: Save (create or rotate) a provider connection
+      description: |
+        Requires role owner or admin. The `credential` field is write-only: accepted on input,
+        encrypted at rest with the deployment's credential encryption key, and never echoed
+        back in this or any other response. Key entry is always an explicit, intentional
+        operation - this endpoint is never called implicitly or with a default/placeholder
+        value.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SaveProviderConnectionRequest' }
+            examples:
+              default:
+                value: { provider: "openrouter", label: "Primary OpenRouter key", credential: "sk-or-..." }
+      responses:
+        '201':
+          description: Provider connection saved. Response contains metadata only.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ProviderConnection' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /tenants/{tenantId}/models:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [Models]
+      operationId: listAllowedModels
+      summary: Allowed models and pricing status
+      description: |
+        Returns the model registry filtered by the tenant's current free-first policy.
+        Pricing status is one of verified_free, paid, unknown or stale; unknown/stale models
+        are never silently treated as free. Usage figures, if present, reflect actual
+        provider-reported usage and are explicitly labelled as estimates when provider quotas
+        are request-counted rather than token-counted.
+      responses:
+        '200':
+          description: Models visible to this tenant under its current policy.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelListResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /tenants/{tenantId}/model-policy:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [ModelPolicy]
+      operationId: getModelPolicy
+      summary: Read the tenant's free-first model policy
+      responses:
+        '200':
+          description: Current policy. allowPaidFallback defaults to false for every tenant.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ModelPolicy' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      tags: [ModelPolicy]
+      operationId: updateModelPolicy
+      summary: Update the tenant's free-first model policy
+      description: |
+        Requires role owner or admin. Enabling allowPaidFallback is an explicit, audited
+        action; it never happens automatically on quota exhaustion.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateModelPolicyRequest' }
+            examples:
+              default:
+                value: { allowPaidFallback: false }
+      responses:
+        '200':
+          description: Policy updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ModelPolicy' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /tenants/{tenantId}/tasks:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [Tasks]
+      operationId: listTasks
+      summary: List tasks for a tenant
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/TaskStatus' }
+      responses:
+        '200':
+          description: Tasks visible to the tenant, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskListResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Tasks]
+      operationId: submitTask
+      summary: Submit a task
+      description: |
+        Requires role owner, admin or operator. Viewer is forbidden. The Idempotency-Key
+        header is required; repeated submissions with the same key for the same tenant return
+        the original persisted task record rather than creating a duplicate. The model implied
+        by the target agent is checked against the free-first policy before the task is
+        queued; a disallowed model yields 409 model_not_allowed rather than queuing silently.
+        Consequential actions (as configured on the agent) land in awaiting_approval instead
+        of running.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTaskRequest' }
+            examples:
+              default:
+                value:
+                  agentId: "77777777-7777-4777-8777-777777777777"
+                  type: "chat"
+                  input: { prompt: "Draft a one-paragraph reply to this support ticket." }
+      responses:
+        '202':
+          description: Task persisted. Body is the full, real task record (not a synthetic ack).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Task' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Idempotency key reused with a different payload, or model not allowed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+              examples:
+                idempotencyConflict:
+                  value: { error: { code: "idempotency_key_conflict", message: "This idempotency key was already used with a different request payload.", requestId: "88888888-8888-4888-8888-888888888888" } }
+                modelNotAllowed:
+                  value: { error: { code: "model_not_allowed", message: "Model is not on the verified free allowlist and paid fallback is disabled for this tenant.", requestId: "99999999-9999-4999-8999-999999999999" } }
+        '429':
+          description: Provider-side free quota exhausted; task queued rather than run, or rejected with an actionable error. Never silently switched to a paid model.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /tenants/{tenantId}/tasks/{taskId}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [Tasks]
+      operationId: getTask
+      summary: Task status and safe result
+      description: Result payloads are pre-filtered server-side to exclude credentials or internal adapter details.
+      responses:
+        '200':
+          description: Task record.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Task' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Task not found in this tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /tenants/{tenantId}/tasks/{taskId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [Tasks]
+      operationId: cancelTask
+      summary: Request cancellation of a task
+      description: |
+        Requires role owner, admin or operator. Only tasks in queued, running or
+        awaiting_approval state can be cancelled; the adapter enforces ownership so a worker
+        never executes a task after its cancellation has been recorded.
+      responses:
+        '200':
+          description: Task transitioned to cancelled (or already terminal; idempotent).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Task' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Task not found in this tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Task already in a terminal state that is not cancelled (succeeded/failed).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /tenants/{tenantId}/approvals:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [Approvals]
+      operationId: listApprovals
+      summary: Pending (and historical) approvals
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/ApprovalStatus' }
+      responses:
+        '200':
+          description: Approvals for the tenant, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalListResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /tenants/{tenantId}/approvals/{approvalId}/decision:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/ApprovalId'
+    post:
+      tags: [Approvals]
+      operationId: decideApproval
+      summary: Approve or reject a bound action
+      description: |
+        Requires role owner or admin. Decisions are immutable once recorded. An approval is
+        bound to tenantId, the originating action and a digest of its payload at creation
+        time; if the underlying task payload changed since, or the approval's expiresAt has
+        passed, the decision is rejected with 409 and the approval is marked expired rather
+        than replayed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DecideApprovalRequest' }
+            examples:
+              approve:
+                value: { decision: "approve" }
+              reject:
+                value: { decision: "reject", reason: "Not authorized for this website." }
+      responses:
+        '200':
+          description: Decision recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Approval' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Approval not found in this tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Approval already decided, expired, or its bound payload digest no longer matches (replay attempt).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+              examples:
+                expired:
+                  value: { error: { code: "approval_expired", message: "This approval expired and can no longer be decided.", requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } }
+                replay:
+                  value: { error: { code: "approval_payload_mismatch", message: "The bound action's payload changed since this approval was created.", requestId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } }
+                alreadyDecided:
+                  value: { error: { code: "approval_already_decided", message: "This approval was already approved or rejected and cannot be changed.", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" } }
+
+  /tenants/{tenantId}/audit-events:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [AuditEvents]
+      operationId: listAuditEvents
+      summary: Paginated audit trail
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Audit events for the tenant, newest first. Metadata is redacted server-side; credentials and raw authorization headers never appear.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditEventListResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /health/live:
+    get:
+      tags: [Health]
+      operationId: healthLive
+      summary: Process liveness
+      description: Confirms the process is up and accepting requests. Contains no sensitive information and no dependency checks.
+      security: []
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [status]
+                    properties:
+                      status: { type: string, const: "ok" }
+
+  /health/ready:
+    get:
+      tags: [Health]
+      operationId: healthReady
+      summary: Required dependency readiness
+      description: |
+        Reports real readiness of required dependencies (database connectivity, and the
+        configured agent adapter). Never reports synthetic success for a dependency that was
+        not actually checked; a missing or unconfigured Hermes adapter is reported as
+        unavailable rather than omitted.
+      security: []
+      responses:
+        '200':
+          description: All required dependencies are ready.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReadinessResponse' }
+        '503':
+          description: One or more required dependencies are not ready.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReadinessResponse' }
+              examples:
+                hermesUnavailable:
+                  value:
+                    data:
+                      status: "degraded"
+                      checks:
+                        database: { status: "ok" }
+                        agentAdapter: { status: "unavailable", detail: "Hermes programmatic interface not configured; set HERMES_ENABLED and verify adapter contract with Codex before enabling." }
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: genie_sid
+      description: Opaque server-side session identifier. The cookie is Secure, HttpOnly and SameSite=Lax/Strict. The raw value is never logged and the server stores only a hash of it.
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: Required on every state-changing request (POST/PATCH/PUT) once a session exists. Must match the non-HttpOnly CSRF cookie issued at login.
+
+  parameters:
+    TenantId:
+      name: tenantId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+      description: Server re-checks the caller's membership and role for this exact tenantId; never trusted on its own.
+    WebsiteId:
+      name: websiteId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AgentId:
+      name: agentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ApprovalId:
+      name: approvalId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+      description: Opaque pagination cursor from a previous response's page.nextCursor.
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 200 }
+      description: Client-generated key, unique per tenant+caller intent. Repeated submissions with the same key and same payload return the original task; a reused key with a different payload is rejected with 409.
+
+  responses:
+    BadRequest:
+      description: Request failed validation.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            default:
+              value: { error: { code: "validation_error", message: "name is required.", requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" } }
+    Unauthorized:
+      description: No valid session.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            default:
+              value: { error: { code: "unauthorized", message: "Sign in to continue.", requestId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" } }
+    Forbidden:
+      description: Authenticated, but the caller's role in this tenant does not permit this action, or the caller has no membership in this tenant.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            default:
+              value: { error: { code: "forbidden", message: "Your role does not permit this action.", requestId: "ffffffff-ffff-4fff-8fff-ffffffffffff" } }
+    CsrfRequired:
+      description: Missing or mismatched CSRF header on a state-changing request.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            default:
+              value: { error: { code: "csrf_mismatch", message: "CSRF token missing or invalid.", requestId: "00000000-0000-4000-8000-000000000000" } }
+    TenantNotFound:
+      description: Tenant does not exist, or the caller has no membership in it (identical response either way, to avoid leaking tenant existence).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    RateLimited:
+      description: Too many requests.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            requestId: { type: string, format: uuid }
+
+    PageInfo:
+      type: object
+      required: [nextCursor]
+      properties:
+        nextCursor: { type: [string, "null"] }
+
+    Role:
+      type: string
+      enum: [owner, admin, operator, viewer]
+
+    User:
+      type: object
+      required: [id, email, displayName, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    Membership:
+      type: object
+      required: [id, tenantId, tenantName, role, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        tenantName: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        createdAt: { type: string, format: date-time }
+
+    AuthMe:
+      type: object
+      required: [user, memberships]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        memberships:
+          type: array
+          items: { $ref: '#/components/schemas/Membership' }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 1, maxLength: 512 }
+
+    Tenant:
+      type: object
+      required: [id, name, slug, role, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    TenantListResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Tenant' }
+        page: { $ref: '#/components/schemas/PageInfo' }
+
+    CreateTenantRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+
+    WebsiteStatus:
+      type: string
+      enum: [active, archived]
+
+    Website:
+      type: object
+      required: [id, tenantId, label, url, status, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        label: { type: string }
+        url: { type: string, format: uri }
+        status: { $ref: '#/components/schemas/WebsiteStatus' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    WebsiteListResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Website' }
+        page: { $ref: '#/components/schemas/PageInfo' }
+
+    CreateWebsiteRequest:
+      type: object
+      required: [label, url]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 200 }
+        url: { type: string, format: uri }
+
+    UpdateWebsiteRequest:
+      type: object
+      minProperties: 1
+      properties:
+        label: { type: string, minLength: 1, maxLength: 200 }
+        url: { type: string, format: uri }
+        status: { $ref: '#/components/schemas/WebsiteStatus' }
+
+    AgentStatus:
+      type: string
+      enum: [active, disabled]
+
+    Agent:
+      type: object
+      required: [id, tenantId, name, status, providerConnectionId, modelId, config, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: [string, "null"] }
+        status: { $ref: '#/components/schemas/AgentStatus' }
+        providerConnectionId: { type: string, format: uuid }
+        modelId: { type: string }
+        requiresApproval: { type: boolean, default: true, description: "When true, actions this agent takes land in awaiting_approval instead of running." }
+        config: { type: object, additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    AgentListResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Agent' }
+        page: { $ref: '#/components/schemas/PageInfo' }
+
+    CreateAgentRequest:
+      type: object
+      required: [name, providerConnectionId, modelId]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 2000 }
+        providerConnectionId: { type: string, format: uuid }
+        modelId: { type: string, minLength: 1 }
+        requiresApproval: { type: boolean, default: true }
+        config: { type: object, additionalProperties: true }
+
+    UpdateAgentRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 2000 }
+        status: { $ref: '#/components/schemas/AgentStatus' }
+        providerConnectionId: { type: string, format: uuid }
+        modelId: { type: string, minLength: 1 }
+        requiresApproval: { type: boolean }
+        config: { type: object, additionalProperties: true }
+
+    ProviderName:
+      type: string
+      enum: [openrouter, gemini]
+
+    CredentialStatus:
+      type: string
+      enum: [present, missing]
+
+    ProviderConnection:
+      type: object
+      required: [id, tenantId, provider, label, credentialStatus, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        provider: { $ref: '#/components/schemas/ProviderName' }
+        label: { type: string }
+        credentialStatus: { $ref: '#/components/schemas/CredentialStatus' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ProviderConnectionListResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/ProviderConnection' }
+        page: { $ref: '#/components/schemas/PageInfo' }
+
+    SaveProviderConnectionRequest:
+      type: object
+      required: [provider, label, credential]
+      properties:
+        provider: { $ref: '#/components/schemas/ProviderName' }
+        label: { type: string, minLength: 1, maxLength: 200 }
+        credential: { type: string, minLength: 1, maxLength: 4096, description: "Write-only. Encrypted at rest; never returned by any endpoint." }
+
+    PricingStatus:
+      type: string
+      enum: [verified_free, paid, unknown, stale]
+
+    Model:
+      type: object
+      required: [modelId, provider, displayName, pricingStatus, allowed]
+      properties:
+        modelId: { type: string }
+        provider: { $ref: '#/components/schemas/ProviderName' }
+        displayName: { type: string }
+        pricingStatus: { $ref: '#/components/schemas/PricingStatus' }
+        allowed: { type: boolean, description: "Whether this tenant may currently use this model under its free-first policy." }
+        inputPricePerMillionTokensUsd: { type: [number, "null"] }
+        outputPricePerMillionTokensUsd: { type: [number, "null"] }
+        lastVerifiedAt: { type: [string, "null"], format: date-time }
+        usage:
+          type: [object, "null"]
+          properties:
+            metric: { type: string, enum: [tokens, requests], description: "Some providers report quota by request count rather than tokens." }
+            used: { type: number }
+            limit: { type: [number, "null"] }
+            isEstimate: { type: boolean, description: "True when the figure is derived/estimated rather than directly reported by the provider." }
+
+    ModelListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Model' }
+
+    ModelPolicy:
+      type: object
+      required: [tenantId, allowPaidFallback, updatedAt]
+      properties:
+        tenantId: { type: string, format: uuid }
+        allowPaidFallback: { type: boolean, default: false }
+        updatedAt: { type: string, format: date-time }
+        updatedBy: { type: [string, "null"], format: uuid }
+
+    UpdateModelPolicyRequest:
+      type: object
+      required: [allowPaidFallback]
+      properties:
+        allowPaidFallback: { type: boolean }
+
+    TaskType:
+      type: string
+      enum: [chat, summarize, embed, title_generate]
+
+    TaskStatus:
+      type: string
+      enum: [queued, running, awaiting_approval, succeeded, failed, cancelled]
+
+    Task:
+      type: object
+      required: [id, tenantId, agentId, type, status, input, idempotencyKey, createdBy, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        websiteId: { type: [string, "null"], format: uuid }
+        agentId: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/TaskType' }
+        status: { $ref: '#/components/schemas/TaskStatus' }
+        input: { type: object, additionalProperties: true }
+        result: { type: [object, "null"], additionalProperties: true, description: "Safe, filtered result. Never includes credentials or raw adapter internals." }
+        error: { type: [string, "null"] }
+        idempotencyKey: { type: string }
+        approvalId: { type: [string, "null"], format: uuid }
+        createdBy: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    TaskListResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Task' }
+        page: { $ref: '#/components/schemas/PageInfo' }
+
+    CreateTaskRequest:
+      type: object
+      required: [agentId, type, input]
+      properties:
+        agentId: { type: string, format: uuid }
+        websiteId: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/TaskType' }
+        input: { type: object, additionalProperties: true }
+
+    ApprovalStatus:
+      type: string
+      enum: [pending, approved, rejected, expired]
+
+    Approval:
+      type: object
+      required: [id, tenantId, taskId, action, payloadDigest, status, expiresAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        taskId: { type: string, format: uuid }
+        action: { type: string }
+        payloadDigest: { type: string, description: "SHA-256 hex digest of the canonicalized bound action payload at creation time." }
+        status: { $ref: '#/components/schemas/ApprovalStatus' }
+        decidedBy: { type: [string, "null"], format: uuid }
+        decidedAt: { type: [string, "null"], format: date-time }
+        reason: { type: [string, "null"] }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    ApprovalListResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Approval' }
+        page: { $ref: '#/components/schemas/PageInfo' }
+
+    DecideApprovalRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+        reason: { type: string, maxLength: 2000 }
+
+    AuditEvent:
+      type: object
+      required: [id, tenantId, action, targetType, targetId, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        actorUserId: { type: [string, "null"], format: uuid }
+        action: { type: string }
+        targetType: { type: string }
+        targetId: { type: string, format: uuid }
+        metadata: { type: object, additionalProperties: true, description: "Redacted server-side; never contains credentials or raw authorization headers." }
+        createdAt: { type: string, format: date-time }
+
+    AuditEventListResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/AuditEvent' }
+        page: { $ref: '#/components/schemas/PageInfo' }
+
+    ReadinessCheck:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok, unavailable] }
+        detail: { type: string }
+
+    ReadinessResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [status, checks]
+          properties:
+            status: { type: string, enum: [ok, degraded] }
+            checks:
+              type: object
+              required: [database, agentAdapter]
+              properties:
+                database: { $ref: '#/components/schemas/ReadinessCheck' }
+                agentAdapter: { $ref: '#/components/schemas/ReadinessCheck' }

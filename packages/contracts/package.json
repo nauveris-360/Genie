@@ -1,0 +1,31 @@
+{
+  "name": "@genie/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Genie V3 API v1 OpenAPI contract and shared TypeScript types. Single source of truth for apps/api and the AI Studio frontend.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./openapi.yaml": "./openapi.yaml"
+  },
+  "files": [
+    "dist",
+    "openapi.yaml",
+    "fixtures"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "generate:types": "openapi-typescript openapi.yaml -o src/generated/openapi-types.ts",
+    "lint:openapi": "redocly lint openapi.yaml"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.4.4",
+    "@redocly/cli": "1.25.11",
+    "typescript": "5.6.3"
+  }
+}

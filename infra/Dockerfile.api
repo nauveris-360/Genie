@@ -1,0 +1,35 @@
+# Reviewable container definition for the Genie API. Not deployed by this repo.
+# Build context is the repository root:  docker build -f infra/Dockerfile.api .
+# No secrets are baked in; all configuration arrives as runtime environment
+# variables (see .env.example). The image runs as an unprivileged user.
+
+FROM node:22.11.0-bookworm-slim AS build
+WORKDIR /repo
+COPY package.json package-lock.json ./
+COPY packages/contracts/package.json packages/contracts/
+COPY apps/api/package.json apps/api/
+RUN npm ci --no-audit --no-fund
+COPY tsconfig.base.json ./
+COPY packages/contracts packages/contracts
+COPY apps/api apps/api
+RUN npm run build --workspace=@genie/contracts \
+ && npm run build --workspace=@genie/api \
+ && npm prune --omit=dev --no-audit --no-fund
+
+FROM node:22.11.0-bookworm-slim AS runtime
+ENV NODE_ENV=production
+WORKDIR /repo
+RUN groupadd --system genie && useradd --system --gid genie --home /repo genie
+COPY --from=build --chown=genie:genie /repo/node_modules node_modules
+COPY --from=build --chown=genie:genie /repo/package.json package.json
+COPY --from=build --chown=genie:genie /repo/packages/contracts/package.json packages/contracts/package.json
+COPY --from=build --chown=genie:genie /repo/packages/contracts/dist packages/contracts/dist
+COPY --from=build --chown=genie:genie /repo/apps/api/package.json apps/api/package.json
+COPY --from=build --chown=genie:genie /repo/apps/api/dist apps/api/dist
+USER genie
+EXPOSE 4000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/api/v1/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# Migrations run on boot (see apps/api/src/index.ts). No --env-file here: the
+# orchestrator injects configuration.
+CMD ["node", "apps/api/dist/index.js"]

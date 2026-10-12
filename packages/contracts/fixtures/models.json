@@ -1,0 +1,46 @@
+{
+  "list_response": {
+    "data": [
+      {
+        "modelId": "openrouter/some-model:free",
+        "provider": "openrouter",
+        "displayName": "Some Model (free)",
+        "pricingStatus": "verified_free",
+        "allowed": true,
+        "inputPricePerMillionTokensUsd": 0,
+        "outputPricePerMillionTokensUsd": 0,
+        "lastVerifiedAt": "2026-10-10T00:00:00Z",
+        "usage": { "metric": "requests", "used": 12, "limit": 200, "isEstimate": false }
+      },
+      {
+        "modelId": "openrouter/some-other-model",
+        "provider": "openrouter",
+        "displayName": "Some Other Model",
+        "pricingStatus": "paid",
+        "allowed": false,
+        "inputPricePerMillionTokensUsd": 3.0,
+        "outputPricePerMillionTokensUsd": 15.0,
+        "lastVerifiedAt": "2026-10-10T00:00:00Z",
+        "usage": null
+      },
+      {
+        "modelId": "gemini/some-preview-model",
+        "provider": "gemini",
+        "displayName": "Some Preview Model",
+        "pricingStatus": "unknown",
+        "allowed": false,
+        "inputPricePerMillionTokensUsd": null,
+        "outputPricePerMillionTokensUsd": null,
+        "lastVerifiedAt": null,
+        "usage": null
+      }
+    ]
+  },
+  "model_policy": {
+    "tenantId": "44444444-4444-4444-8444-444444444444",
+    "allowPaidFallback": false,
+    "updatedAt": "2026-10-01T00:00:00Z",
+    "updatedBy": null
+  },
+  "update_model_policy_request": { "allowPaidFallback": false }
+}

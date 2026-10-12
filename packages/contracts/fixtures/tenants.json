@@ -1,0 +1,24 @@
+{
+  "create_request": { "name": "Acme Co" },
+  "tenant": {
+    "id": "44444444-4444-4444-8444-444444444444",
+    "name": "Acme Co",
+    "slug": "acme-co",
+    "role": "owner",
+    "createdAt": "2026-10-01T00:00:00Z",
+    "updatedAt": "2026-10-01T00:00:00Z"
+  },
+  "list_response": {
+    "data": [
+      {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "name": "Acme Co",
+        "slug": "acme-co",
+        "role": "owner",
+        "createdAt": "2026-10-01T00:00:00Z",
+        "updatedAt": "2026-10-01T00:00:00Z"
+      }
+    ],
+    "page": { "nextCursor": null }
+  }
+}

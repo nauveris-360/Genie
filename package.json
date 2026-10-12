@@ -1,0 +1,21 @@
+{
+  "name": "genie",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Genie V3 control plane monorepo (backend + contracts). Frontend owned by AI Studio, Hermes adapter integration owned by Codex.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=@genie/contracts && npm run build --workspace=@genie/api",
+    "test": "npm run test --workspace=@genie/api",
+    "migrate": "npm run migrate --workspace=@genie/api",
+    "migrate:rollback": "npm run migrate:rollback --workspace=@genie/api",
+    "bootstrap:owner": "npm run bootstrap:owner --workspace=@genie/api",
+    "lint": "npm run lint --workspace=@genie/api"
+  },
+  "engines": {
+    "node": ">=20 <23"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "create_request": { "label": "Marketing site", "url": "https://example.com" },
+  "update_request": { "status": "archived" },
+  "website": {
+    "id": "55555555-5555-4555-8555-555555555551",
+    "tenantId": "44444444-4444-4444-8444-444444444444",
+    "label": "Marketing site",
+    "url": "https://example.com",
+    "status": "active",
+    "createdAt": "2026-10-02T00:00:00Z",
+    "updatedAt": "2026-10-02T00:00:00Z"
+  },
+  "list_response": {
+    "data": [
+      {
+        "id": "55555555-5555-4555-8555-555555555551",
+        "tenantId": "44444444-4444-4444-8444-444444444444",
+        "label": "Marketing site",
+        "url": "https://example.com",
+        "status": "active",
+        "createdAt": "2026-10-02T00:00:00Z",
+        "updatedAt": "2026-10-02T00:00:00Z"
+      }
+    ],
+    "page": { "nextCursor": null }
+  }
+}
