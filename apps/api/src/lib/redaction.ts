@@ -32,11 +32,11 @@ function scrub(value: unknown, depth: number): unknown {
   if (depth > 20) return '[truncated]';
   if (Array.isArray(value)) return value.map((v) => scrub(v, depth + 1));
   if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = SENSITIVE_KEY.test(key) ? '[redacted]' : scrub(v, depth + 1);
-    }
-    return out;
+    // Object.fromEntries defines own data properties, so a "__proto__" key is
+    // kept (and scrubbed) instead of becoming the result's prototype.
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, v]) => [key, SENSITIVE_KEY.test(key) ? '[redacted]' : scrub(v, depth + 1)]),
+    );
   }
   return value;
 }

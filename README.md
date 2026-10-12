@@ -38,7 +38,7 @@ npm run dev                                # http://localhost:4000/api/v1/health
 cp apps/api/.env.test.example apps/api/.env.test   # point at a disposable DB
 npm test
 ```
-45 integration tests run serially against a real PostgreSQL 16 database using a
+67 integration tests run serially against a real PostgreSQL 16 database using a
 mock agent adapter; details and coverage list in `docs/RUNBOOK.md`.
 
 ## Guarantees implemented and tested

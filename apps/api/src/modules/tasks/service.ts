@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 import type { ProviderName, Task, TaskStatus, TaskType } from '@genie/contracts';
 import { loadConfig } from '../../config.js';
 import { withTenant } from '../../db/index.js';
-import { errors } from '../../lib/errors.js';
+import { AppError, errors } from '../../lib/errors.js';
 import { payloadDigest } from '../../lib/digest.js';
 import { scrubObject } from '../../lib/redaction.js';
 import { toIso } from '../../lib/time.js';
@@ -99,36 +99,87 @@ export class TaskService {
   }
 
   /**
-   * Execute a queued task through the adapter. The transition queued -> running
-   * is a conditional UPDATE, so two workers racing on the same task cannot both
-   * execute it: only the one that wins the row proceeds.
+   * Execute a queued task through the adapter. This is the only adapter
+   * dispatch site, and it re-authorizes everything immediately before calling
+   * out, because a task can sit in awaiting_approval for up to an hour while
+   * the agent, its provider connection, the tenant policy or the model's
+   * verified pricing change. In one transaction it:
+   *  - claims queued -> running with a conditional UPDATE (two workers racing on
+   *    the same task cannot both execute it);
+   *  - reloads the CURRENT agent and provider connection, both scoped to the
+   *    task's tenant (explicit predicates plus RLS);
+   *  - refuses a disabled agent;
+   *  - re-runs the free-first policy for the agent's current model and this
+   *    task's call kind, against the tenant's current policy and the model's
+   *    current verified pricing;
+   *  - requires the model's registered provider to match the connection that
+   *    will be used.
+   * Any failure marks the task failed with a visible error and audit event, and
+   * the adapter is never called. The values dispatched are exactly the ones
+   * that were checked.
    */
   async run(tenantId: string, taskId: string): Promise<TaskRow> {
-    const claimed = await withTenant(tenantId, async (client) => {
+    const gate = await withTenant(tenantId, async (client) => {
       const { rows } = await client.query<TaskRow>(
         `UPDATE tasks SET status = 'running', updated_at = now() WHERE id = $1 AND tenant_id = $2 AND status = 'queued' RETURNING *`,
         [taskId, tenantId],
       );
       const row = rows[0];
-      if (!row) return null;
-      const agentRes = await client.query<AgentRow & { provider: ProviderName; encrypted_credential: Buffer }>(
-        `SELECT a.*, p.provider, p.encrypted_credential FROM agents a JOIN provider_connections p ON p.id = a.provider_connection_id
-         WHERE a.id = $1 AND a.tenant_id = $2 AND p.tenant_id = $2`,
+      if (!row) return { kind: 'not_claimed' as const };
+
+      const block = async (reason: string, metadata: Record<string, unknown>) => {
+        const upd = await client.query<TaskRow>(
+          `UPDATE tasks SET status = 'failed', error = $3, updated_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+          [row.id, tenantId, `Blocked before dispatch: ${reason}`],
+        );
+        await recordAudit(client, { tenantId, actorUserId: null, action: 'task.dispatch_blocked', targetType: 'task', targetId: row.id, metadata: { reason, type: row.type, ...metadata } });
+        return { kind: 'blocked' as const, row: upd.rows[0]! };
+      };
+
+      const agentRes = await client.query<AgentRow & { provider: ProviderName | null; encrypted_credential: Buffer | null }>(
+        `SELECT a.*, p.provider, p.encrypted_credential
+         FROM agents a LEFT JOIN provider_connections p ON p.id = a.provider_connection_id AND p.tenant_id = $2
+         WHERE a.id = $1 AND a.tenant_id = $2`,
         [row.agent_id, tenantId],
       );
       const agent = agentRes.rows[0];
-      if (!agent) throw errors.notFound('Agent');
-      return { row, agent };
+      if (!agent) return block('agent not found in this tenant', { agentId: row.agent_id });
+      if (!agent.provider || !agent.encrypted_credential) {
+        return block('provider connection not found in this tenant', { agentId: agent.id, providerConnectionId: agent.provider_connection_id });
+      }
+      if (agent.status !== 'active') return block('agent is disabled', { agentId: agent.id });
+
+      let model;
+      try {
+        model = await assertModelAllowed(client, tenantId, agent.model_id, row.type);
+      } catch (err) {
+        if (err instanceof AppError && err.code === 'model_not_allowed') {
+          return block(`model_not_allowed: ${err.message}`, { agentId: agent.id, modelId: agent.model_id, provider: agent.provider });
+        }
+        throw err;
+      }
+      if (model.provider !== agent.provider) {
+        return block(`model ${model.modelId} is registered for ${model.provider} but the agent's connection is ${agent.provider}`, {
+          agentId: agent.id, modelId: model.modelId, modelProvider: model.provider, connectionProvider: agent.provider,
+        });
+      }
+      return {
+        kind: 'dispatch' as const,
+        row,
+        dispatch: { agentId: agent.id, modelId: model.modelId, provider: agent.provider, encryptedCredential: agent.encrypted_credential },
+      };
     });
-    if (!claimed) {
+
+    if (gate.kind === 'not_claimed') {
       return (await this.get(tenantId, taskId)) ?? Promise.reject(errors.notFound('Task'));
     }
+    if (gate.kind === 'blocked') return gate.row;
 
-    const { row, agent } = claimed;
+    const { row, dispatch } = gate;
     let finalStatus: TaskStatus; let result: Record<string, unknown> | null = null; let error: string | null = null; let externalRef: string | null = null;
     try {
-      const credential = decryptSecret(agent.encrypted_credential, loadConfig().credentialEncryptionKey);
-      const submitted = await this.adapter.submit({ taskId: row.id, tenantId, agentId: agent.id, type: row.type, modelId: agent.model_id, provider: agent.provider, credential, input: row.input });
+      const credential = decryptSecret(dispatch.encryptedCredential, loadConfig().credentialEncryptionKey);
+      const submitted = await this.adapter.submit({ taskId: row.id, tenantId, agentId: dispatch.agentId, type: row.type, modelId: dispatch.modelId, provider: dispatch.provider, credential, input: row.input });
       externalRef = submitted.externalRef;
       const status = await this.adapter.status(externalRef);
       if (status.state === 'succeeded') { finalStatus = 'succeeded'; result = scrubObject(status.result); }

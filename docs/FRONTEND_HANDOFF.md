@@ -6,7 +6,7 @@ For AI Studio (apps/web) and Codex reconciliation. Source of truth is
 example payloads for every endpoint are in `packages/contracts/fixtures/*.json`.
 If this page and the YAML ever disagree, the YAML wins — tell us.
 
-Status: backend implemented and integration-tested (45 tests) against
+Status: backend implemented and integration-tested (67 tests) against
 PostgreSQL 16 with a **mock** agent adapter. Hermes is **not** integrated
 (readiness reports it `unavailable`). There is **no pricing-verification job
 yet, so in a real deployment every model is refused** (`409
@@ -22,6 +22,15 @@ billing are not implemented. Nothing is deployed.
   `Model.pricingStatus` is now the *effective* status: `seed` rows report
   `unknown`; trusted rows older than 72 h report `stale`. Prices and
   `lastVerifiedAt` are `null` unless `trusted`. `usage` is always present and `null`.
+* Approve no longer guarantees execution: the model policy, agent and provider
+  are re-checked immediately before dispatch, and a task can end `failed` with
+  `error` starting `Blocked before dispatch:` (see semantics §5).
+* `payloadDigest` canonicalization now keeps JSON `"__proto__"` keys (they were
+  silently dropped); the format is otherwise unchanged (§ "Approval digest").
+* Every authenticated state-changing operation in `openapi.yaml` now declares
+  `security: [{ cookieAuth, csrfHeader }]` (behaviour unchanged).
+* JSON bodies containing a `"__proto__"` key or a `"constructor": {"prototype": …}`
+  member anywhere are rejected with `400 validation_error`, never stripped.
 
 ## Transport conventions
 
@@ -186,6 +195,16 @@ its prices (they are `null`).
    `GET …/tasks/{id}` anyway** — the contract allows `queued`/`running`.
 5. Approve → decision recorded (immutable, `decidedBy/At` set) → task runs →
    `succeeded`/`failed`. Reject → task `cancelled`, `error = "rejected: <reason>"`.
+   Immediately before any adapter call the server re-checks, against current
+   state: the agent and its provider connection still exist in this tenant, the
+   agent is `active`, the agent's **current** model passes the tenant's
+   **current** free-first policy (with current verified pricing, for this task's
+   `type`), and the model's provider matches the connection. If any check fails
+   the decision stays `approved` (`200`), but the task becomes `failed` with
+   `error` beginning `Blocked before dispatch:` and a `task.dispatch_blocked`
+   audit event; no model call is made and the task never runs later. Show the
+   approval as approved **and** the task error; to proceed, fix the cause and
+   submit a new task.
 6. Replay of a decided approval → `409 approval_already_decided`. Any change to
    the task payload after creation → `409 approval_payload_mismatch` (approval
    stays `pending`, task stays `awaiting_approval`). Past `expiresAt` → `409
@@ -193,9 +212,36 @@ its prices (they are `null`).
 7. Cancel is allowed from `queued`/`running`/`awaiting_approval` (expires any
    pending approval) and is idempotent on `cancelled`; on `succeeded`/`failed` → `409`.
 8. Every action above writes an AuditEvent (`task.submitted`, `approval.requested`,
-   `approval.decided`, `approval.expired`, `task.succeeded|failed|cancelled`,
-   `provider.credential_saved`, `model_policy.updated`, `website.*`, `agent.*`,
-   `tenant.created`). Metadata is redacted server-side.
+   `approval.decided`, `approval.expired`, `task.dispatch_blocked`,
+   `task.succeeded|failed|cancelled`, `provider.credential_saved`,
+   `model_policy.updated`, `website.*`, `agent.*`, `tenant.created`). Metadata is
+   redacted server-side.
+
+### Approval digest (`payloadDigest`) — canonical form v1
+You should not need to compute it (the server binds and checks it); if you do,
+match exactly:
+
+1. Object: `{ tenantId, agentId, type, input, websiteId }` from the stored task
+   (`websiteId` is `null` when absent, never omitted). Use `input` as returned by
+   `GET …/tasks/{id}`.
+2. Recursively rebuild every object with its own keys inserted in
+   `Object.keys(o).sort()` order (arrays keep their order), creating keys with
+   `Object.fromEntries` (or a null-prototype accumulator) so a `"__proto__"` key
+   is kept as data. Do **not** use `out[key] = …` on a `{}` accumulator.
+3. `JSON.stringify` the result (no whitespace) and SHA-256 it (lowercase hex).
+
+Because JS objects enumerate array-index keys (`"0"` … `"4294967294"`) first in
+ascending numeric order, the emitted key order is: array-index keys
+numerically, then every other key (including `"-1"`, `"01"`, `"1.5"`,
+`"4294967295"`, `"__proto__"`) in UTF-16 code-unit order. Reference vectors:
+
+```
+{"agentId":"77777777-7777-4777-8777-777777777771","input":{"options":{"a":1,"b":2},"prompt":"Post this reply to the live ticket."},"tenantId":"44444444-4444-4444-8444-444444444444","type":"chat","websiteId":null}
+→ 13a3614698b7a3f721234f372b8ee6a0d59afb6b5a7d59053b7fa4e6151dfffd
+
+{"agentId":"77777777-7777-4777-8777-777777777771","input":{"9":"nine","10":"ten","a":1,"b":[{"1":"y","2":"x"}],"prompt":"p"},"tenantId":"44444444-4444-4444-8444-444444444444","type":"chat","websiteId":null}
+→ fc6a6b8127eff2f4542fd0ecf38298b170b28aef81fa5e95d031c714a31065e3
+```
 
 ## Free-first policy (what the UI should expect)
 

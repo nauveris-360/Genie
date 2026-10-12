@@ -16,6 +16,6 @@
     "lint": "npm run lint --workspace=@genie/api"
   },
   "engines": {
-    "node": ">=20 <23"
+    "node": ">=22.12 <23"
   }
 }

@@ -106,6 +106,19 @@ wrong in either direction is a security issue: too broad lets clients spoof
 their bucket; empty behind a proxy puts every user in the proxy's single
 bucket (shared 20-failure budget). Invalid values abort startup.
 
+## Pre-dispatch gate
+`TaskService.run` is the only place the adapter is called. In the same
+transaction that claims a task it reloads the current agent and provider
+connection (tenant-scoped), refuses a disabled agent, re-runs the free-first
+policy for the agent's current model and the task's call kind, and requires the
+model's provider to match the connection. A failed check marks the task
+`failed` (`Blocked before dispatch: …`) with a `task.dispatch_blocked` audit
+event and no adapter call. Known limit: the approval digest binds the task
+payload, not the agent's configuration, so an agent edit that still passes
+policy (e.g. a different allowed free model or changed `config`) does not
+invalidate a pending approval. Binding agent configuration would be a new,
+versioned digest format.
+
 ## Model pricing provenance (fail closed)
 Every row in `models` has `verification_source`: `seed` (placeholder, from
 migrations) or `trusted` (written only by `recordTrustedVerification`, the
@@ -125,7 +138,7 @@ rebuilds them against the same database.
 
 ## Tests
 ```bash
-npm test     # 45 integration tests, serial, against DATABASE_URL in apps/api/.env.test
+npm test     # 67 integration tests, serial, against DATABASE_URL in apps/api/.env.test
 ```
 The suite migrates the test database from whatever state it is in, truncates
 data between files, and in `migrations.test.ts` drops and recreates the schema.
@@ -143,7 +156,12 @@ password or account-existence oracle, no lockout of the user at another
 address, concurrent-race bound, success refunds, window expiry,
 X-Forwarded-For spoofing with and without a trusted proxy, IPv6 /64 grouping,
 invalid proxy config), migrations up/idempotent/down/re-up/checksum tamper,
-restart persistence. Test model rows are written through
+restart persistence, digest canonicalization (own `__proto__`/`constructor`/
+integer-like keys bound into approval and idempotency digests, byte-identical to
+the v1 format otherwise, pinned legacy hashes), and the pre-dispatch gate
+(model switched, fallback turned off, pricing stale/repriced/revoked, agent
+disabled, provider mismatch, wrong-tenant run — each with zero adapter calls).
+Test model rows are written through
 `recordTrustedVerification`, standing in for the future verification job.
 
 ## Containers (review only — not deployed)

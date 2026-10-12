@@ -120,6 +120,9 @@ paths:
     post:
       tags: [Auth]
       operationId: logout
+      security:
+        - cookieAuth: []
+          csrfHeader: []
       summary: Invalidate the current session
       description: Deletes the server-side session row and clears both cookies. Idempotent.
       responses:
@@ -186,6 +189,9 @@ paths:
     post:
       tags: [Tenants]
       operationId: createTenant
+      security:
+        - cookieAuth: []
+          csrfHeader: []
       summary: Create a tenant
       description: Creates a new tenant and makes the caller its owner via a new membership row.
       requestBody:
@@ -239,6 +245,9 @@ paths:
     post:
       tags: [Websites]
       operationId: registerWebsite
+      security:
+        - cookieAuth: []
+          csrfHeader: []
       summary: Register a website
       description: Requires role owner, admin or operator. Viewer is forbidden.
       requestBody:
@@ -273,6 +282,9 @@ paths:
     patch:
       tags: [Websites]
       operationId: updateWebsite
+      security:
+        - cookieAuth: []
+          csrfHeader: []
       summary: Edit or archive a website
       description: Requires role owner, admin or operator. Viewer is forbidden.
       requestBody:
@@ -328,6 +340,9 @@ paths:
     post:
       tags: [Agents]
       operationId: createAgent
+      security:
+        - cookieAuth: []
+          csrfHeader: []
       summary: Create an agent
       description: |
         Requires role owner, admin or operator. The chosen modelId is validated against the
@@ -373,6 +388,9 @@ paths:
     patch:
       tags: [Agents]
       operationId: updateAgent
+      security:
+        - cookieAuth: []
+          csrfHeader: []
       summary: Update agent configuration
       description: Requires role owner, admin or operator. Viewer is forbidden.
       requestBody:
@@ -428,6 +446,9 @@ paths:
     post:
       tags: [Providers]
       operationId: saveProviderConnection
+      security:
+        - cookieAuth: []
+          csrfHeader: []
       summary: Save (create or rotate) a provider connection
       description: |
         Requires role owner or admin. The `credential` field is write-only: accepted on input,
@@ -508,6 +529,9 @@ paths:
     put:
       tags: [ModelPolicy]
       operationId: updateModelPolicy
+      security:
+        - cookieAuth: []
+          csrfHeader: []
       summary: Update the tenant's free-first model policy
       description: |
         Requires role owner or admin. Enabling allowPaidFallback is an explicit, audited
@@ -564,6 +588,9 @@ paths:
     post:
       tags: [Tasks]
       operationId: submitTask
+      security:
+        - cookieAuth: []
+          csrfHeader: []
       summary: Submit a task
       description: |
         Requires role owner, admin or operator. Viewer is forbidden. The Idempotency-Key
@@ -654,6 +681,9 @@ paths:
     post:
       tags: [Tasks]
       operationId: cancelTask
+      security:
+        - cookieAuth: []
+          csrfHeader: []
       summary: Request cancellation of a task
       description: |
         Requires role owner, admin or operator. Only tasks in queued, running or
@@ -716,6 +746,9 @@ paths:
     post:
       tags: [Approvals]
       operationId: decideApproval
+      security:
+        - cookieAuth: []
+          csrfHeader: []
       summary: Approve or reject a bound action
       description: |
         Requires role owner or admin. Decisions are immutable once recorded. An approval is
