@@ -41,7 +41,7 @@ npm run dev                                # http://localhost:4000/api/v1/health
 cp apps/api/.env.test.example apps/api/.env.test   # point at a disposable DB
 npm test
 ```
-89 integration tests run serially against a real PostgreSQL 16 database using a
+99 integration tests run serially against a real PostgreSQL 16 database using a
 mock agent adapter; details and coverage list in `docs/RUNBOOK.md`.
 
 ## Guarantees implemented and tested
@@ -72,3 +72,7 @@ mock agent adapter; details and coverage list in `docs/RUNBOOK.md`.
 * Members and one-time invitations with an owner/admin role hierarchy and a
   guaranteed last owner.
 * Backup and restore-rehearsal scripts (`infra/scripts/`), rehearsed locally.
+* Fail-closed production startup gate (no superuser/BYPASSRLS role, schema at
+  the build's version, RLS intact) and advisory-lock-serialized migrations;
+  separate provisioning, migration, runtime and backup roles
+  (`docs/DEPLOYMENT.md`).

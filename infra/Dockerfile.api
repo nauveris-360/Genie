@@ -1,36 +1,48 @@
-# Reviewable container definition for the Genie API. Not deployed by this repo.
-# Build context is the repository root:  docker build -f infra/Dockerfile.api .
+# Reviewable container definition for genie-core (the Genie API). Not deployed
+# by this repo. Build context is the repository root, filtered by .dockerignore:
+#   docker build -f infra/Dockerfile.api -t genie-core .
 # No secrets are baked in; all configuration arrives as runtime environment
-# variables (see .env.example). The image runs as an unprivileged user.
+# variables (see docs/DEPLOYMENT.md). One image, two commands:
+#   runtime:   node apps/api/dist/index.js        (default CMD, runtime DB role)
+#   migration: node apps/api/dist/db/cli.js up     (one-off job, migration DB role)
 
 FROM node:22.22.0-bookworm-slim AS build
 WORKDIR /repo
 COPY package.json package-lock.json ./
 COPY packages/contracts/package.json packages/contracts/
 COPY apps/api/package.json apps/api/
-RUN npm ci --no-audit --no-fund
+# In a combined workspace that also contains the web app, add its manifest so
+# the lockfile and workspaces stay consistent:
+#   COPY apps/web/package.json apps/web/
+# The install and prune below are scoped to the API and contracts, so the web
+# app's dependencies are never installed into this image either way.
+RUN npm ci --no-audit --no-fund --workspace=@genie/api --workspace=@genie/contracts --include-workspace-root
 COPY tsconfig.base.json ./
 COPY packages/contracts packages/contracts
 COPY apps/api apps/api
 RUN npm run build --workspace=@genie/contracts \
  && npm run build --workspace=@genie/api \
- && npm prune --omit=dev --no-audit --no-fund
+ && npm prune --omit=dev --no-audit --no-fund --workspace=@genie/api --workspace=@genie/contracts --include-workspace-root
 
 FROM node:22.22.0-bookworm-slim AS runtime
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    MIGRATE_ON_BOOT=false
 WORKDIR /repo
 RUN groupadd --system genie && useradd --system --gid genie --home /repo genie
-COPY --from=build --chown=genie:genie /repo/node_modules node_modules
-COPY --from=build --chown=genie:genie /repo/package.json package.json
-COPY --from=build --chown=genie:genie /repo/packages/contracts/package.json packages/contracts/package.json
-COPY --from=build --chown=genie:genie /repo/packages/contracts/dist packages/contracts/dist
-COPY --from=build --chown=genie:genie /repo/apps/api/package.json apps/api/package.json
-COPY --from=build --chown=genie:genie /repo/apps/api/dist apps/api/dist
-COPY --from=build --chown=genie:genie /repo/apps/api/config apps/api/config
+# Application files stay root-owned: the unprivileged runtime user can read but not modify them.
+COPY --from=build /repo/node_modules node_modules
+COPY --from=build /repo/package.json package.json
+COPY --from=build /repo/packages/contracts/package.json packages/contracts/package.json
+COPY --from=build /repo/packages/contracts/dist packages/contracts/dist
+COPY --from=build /repo/apps/api/package.json apps/api/package.json
+COPY --from=build /repo/apps/api/dist apps/api/dist
+COPY --from=build /repo/apps/api/config apps/api/config
 USER genie
 EXPOSE 4000
+# Liveness only. /api/v1/health/ready is 503 while Hermes is unavailable, so it
+# must not be used as the container health check.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/api/v1/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-# Migrations run on boot (see apps/api/src/index.ts). No --env-file here: the
-# orchestrator injects configuration.
+# Startup refuses (exit 1) on an unsafe DB role, pending/modified/unknown
+# migrations, or missing RLS; see apps/api/src/db/safety.ts.
 CMD ["node", "apps/api/dist/index.js"]

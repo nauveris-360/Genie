@@ -61,6 +61,8 @@ export interface Config {
   loginRateLimitWindowSeconds: number;
   loginMaxFailuresPerIp: number;
   loginMaxFailuresPerIpAccount: number;
+  /** Run migrations at startup (true) or require a separate migration job to have done so (false). */
+  migrateOnBoot: boolean;
   /** A trusted price verification older than this is treated as stale and fails closed. */
   modelPricingMaxAgeHours: number;
   defaultAllowPaidFallback: boolean;
@@ -90,6 +92,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     loginRateLimitWindowSeconds: positiveInt('LOGIN_RATE_LIMIT_WINDOW_SECONDS', env.LOGIN_RATE_LIMIT_WINDOW_SECONDS, 900),
     loginMaxFailuresPerIp: positiveInt('LOGIN_MAX_FAILURES_PER_IP', env.LOGIN_MAX_FAILURES_PER_IP, 20),
     loginMaxFailuresPerIpAccount: positiveInt('LOGIN_MAX_FAILURES_PER_IP_ACCOUNT', env.LOGIN_MAX_FAILURES_PER_IP_ACCOUNT, 5),
+    migrateOnBoot: bool(env.MIGRATE_ON_BOOT, true),
     modelPricingMaxAgeHours: positiveInt('MODEL_PRICING_MAX_AGE_HOURS', env.MODEL_PRICING_MAX_AGE_HOURS, 72),
     defaultAllowPaidFallback: bool(env.DEFAULT_ALLOW_PAID_FALLBACK, false),
     hermesEnabled: bool(env.HERMES_ENABLED, false),

@@ -1,0 +1,37 @@
+# Build context for infra/Dockerfile.api. Keep secrets, data and local build
+# output out of the context, so they never reach the builder or an image layer.
+
+# Version control and editor state
+.git
+.gitignore
+.claude
+**/.DS_Store
+
+# Secrets and local environment files (templates are not needed in the image either)
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/id_rsa*
+**/id_ed25519*
+**/.npmrc
+**/.pgpass
+
+# Dependencies and build output (rebuilt inside the image)
+**/node_modules
+**/dist
+**/build
+**/coverage
+**/*.tsbuildinfo
+**/*.log
+
+# Database dumps, backups and user uploads
+**/backups
+**/uploads
+**/*.dump
+**/*.dump.sha256
+**/*.sql.gz
+**/*.sqlite
+**/*.db

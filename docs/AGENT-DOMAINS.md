@@ -83,6 +83,9 @@ Options (owner and Codex to choose; not implemented):
   in the login/me response so the app keeps it in memory, and keeps cookies
   host-only. This is a contract change and needs tests.
 
+Status: Codex is preparing the public test with **option A**. Backend guidance
+is in `docs/DEPLOYMENT.md`; the owner still approves each deployment step.
+
 Whichever is chosen: **never** widen cookies to `Domain=.genie.readyqr.com` or
 `Domain=.readyqr.com`. That would send Genie session cookies to every agent
 subdomain in the map, including seo, marketing and the others.

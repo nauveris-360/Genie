@@ -1,20 +1,41 @@
-# Reviewable local composition for the Genie API + PostgreSQL. NOT a deployment
-# manifest: the production target (VPS 2 via Coolify, hostname/TLS chosen with
-# the owner, off-server backups) is a separate, approved step. All secrets come
-# from the shell/orchestrator environment; the placeholders below fail loudly
-# if left unset. The database is never published outside the compose network.
+# Reviewable local composition for genie-core (Genie API) + PostgreSQL. NOT a
+# deployment manifest: the production target (VPS 2 via Coolify, hostnames per
+# docs/AGENT-DOMAINS.md, TLS, off-server backups) is a separate, approved step.
+# All secrets come from the shell/orchestrator environment; unset placeholders
+# fail loudly. The database is never published outside the compose network.
+#
+# Database roles (see infra/db/provision-roles.sql and docs/DEPLOYMENT.md):
+#   postgres     image superuser: used ONLY by the one-time init script.
+#   genie_owner  migration role: the "migrate" job; owns the schema.
+#   genie_app    runtime role: the "api" service; no DDL, not superuser, no BYPASSRLS.
+#   genie_backup backup role (BYPASSRLS, read-only): backups only, never the app.
+# Use hex passwords (openssl rand -hex 32): they need no URL escaping below.
+#
+#   docker compose -f infra/docker-compose.yml up --build
+
+x-api-image: &api-image
+  build:
+    context: ..
+    dockerfile: infra/Dockerfile.api
+  image: genie-core:local
 
 services:
   db:
     image: postgres:16.6-bookworm
     environment:
       POSTGRES_DB: genie
-      POSTGRES_USER: genie
-      POSTGRES_PASSWORD: ${GENIE_DB_PASSWORD:?set GENIE_DB_PASSWORD}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${GENIE_DB_SUPERUSER_PASSWORD:?set GENIE_DB_SUPERUSER_PASSWORD}
+      # Read only by infra/db-init/01-genie-roles.sh, on first initialization of the volume.
+      GENIE_OWNER_PASSWORD: ${GENIE_OWNER_PASSWORD:?set GENIE_OWNER_PASSWORD}
+      GENIE_APP_PASSWORD: ${GENIE_APP_PASSWORD:?set GENIE_APP_PASSWORD}
+      GENIE_BACKUP_PASSWORD: ${GENIE_BACKUP_PASSWORD:?set GENIE_BACKUP_PASSWORD}
     volumes:
       - genie-db:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+      - ./db:/genie-db:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U genie -d genie"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d genie"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -23,32 +44,47 @@ services:
         limits: { cpus: "1.0", memory: 1g }
     networks: [genie-internal]
 
-  api:
-    build:
-      context: ..
-      dockerfile: infra/Dockerfile.api
+  migrate:
+    <<: *api-image
+    command: ["node", "apps/api/dist/db/cli.js", "up"]
+    restart: "no"
     depends_on:
       db:
         condition: service_healthy
     environment:
       NODE_ENV: production
+      MIGRATION_DATABASE_URL: postgres://genie_owner:${GENIE_OWNER_PASSWORD:?set GENIE_OWNER_PASSWORD}@db:5432/genie
+      DATABASE_SSL: "false"
+    read_only: true
+    networks: [genie-internal]
+
+  api:
+    <<: *api-image
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
       PORT: "4000"
       HOST: 0.0.0.0
-      DATABASE_URL: postgres://genie:${GENIE_DB_PASSWORD:?set GENIE_DB_PASSWORD}@db:5432/genie
+      DATABASE_URL: postgres://genie_app:${GENIE_APP_PASSWORD:?set GENIE_APP_PASSWORD}@db:5432/genie
       DATABASE_SSL: "false"
       DATABASE_POOL_MAX: "10"
+      MIGRATE_ON_BOOT: "false"
       SESSION_COOKIE_NAME: genie_sid
       SESSION_COOKIE_SECRET: ${GENIE_SESSION_COOKIE_SECRET:?set GENIE_SESSION_COOKIE_SECRET}
       SESSION_TTL_MINUTES: "720"
       CSRF_COOKIE_NAME: genie_csrf
-      ALLOWED_ORIGINS: ${GENIE_ALLOWED_ORIGINS:?set GENIE_ALLOWED_ORIGINS, e.g. https://app.example.com}
-      # Set to the reverse proxy's address/CIDR once routing is chosen; empty = trust no X-Forwarded-For.
+      # Option A (docs/DEPLOYMENT.md): exactly https://genie.readyqr.com in the public test.
+      ALLOWED_ORIGINS: ${GENIE_ALLOWED_ORIGINS:?set GENIE_ALLOWED_ORIGINS, e.g. https://genie.readyqr.com}
+      # The reverse proxies in front of the API (IPs/CIDRs); empty = trust no X-Forwarded-For.
       TRUSTED_PROXIES: ${GENIE_TRUSTED_PROXIES:-}
       CREDENTIAL_ENCRYPTION_KEY: ${GENIE_CREDENTIAL_ENCRYPTION_KEY:?set GENIE_CREDENTIAL_ENCRYPTION_KEY}
-      DEFAULT_ALLOW_PAID_FALLBACK: "false"
       HERMES_ENABLED: "false"
     ports:
-      - "127.0.0.1:4000:4000"   # loopback only; a reverse proxy terminates TLS and exposes approved routes
+      - "127.0.0.1:4000:4000"   # loopback only; the private reverse proxy is the only public path
     read_only: true
     tmpfs: [/tmp]
     deploy:
@@ -61,4 +97,4 @@ volumes:
 
 networks:
   genie-internal:
-    internal: false   # api needs egress only for provider calls once an adapter exists; db has no published port
+    internal: false   # api needs egress for the pricing sync and, later, provider calls; db has no published port

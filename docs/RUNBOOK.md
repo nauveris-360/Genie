@@ -15,6 +15,9 @@ production websites) is never touched by this repository.
   ```
   The application role must **not** be a superuser and must **not** have
   `BYPASSRLS`; the row-level-security policies are part of tenant isolation.
+  In production the API refuses to start otherwise. Locally it only warns.
+  For production, use the separate provisioning, migration, runtime and backup
+  roles in `docs/DEPLOYMENT.md` §3.
 
 ## Configure
 ```bash
@@ -37,7 +40,25 @@ npm run build --workspace=@genie/contracts
 npm run migrate            # applies apps/api/src/migrations/*.up.sql in order
 npm run dev                # http://localhost:4000/api/v1/health/live
 ```
-`npm start` (and `npm run dev`) also run pending migrations on boot.
+`npm start` (and `npm run dev`) also run pending migrations on boot while
+`MIGRATE_ON_BOOT` is `true` (the default outside the container image). The
+production image defaults to `MIGRATE_ON_BOOT=false`: a separate migration job
+(`node apps/api/dist/db/cli.js up`, migration role) runs first. The API then
+only verifies that the schema matches its build and refuses to start if it
+doesn't.
+
+### Startup gate (fail closed in production)
+Before listening, the API checks, in this order:
+1. its database role is neither a superuser nor `BYPASSRLS` (checked before
+   any migration runs);
+2. the schema: it migrates when `MIGRATE_ON_BOOT=true`, otherwise it requires
+   no pending, modified or unknown migrations;
+3. RLS is enabled and forced, with the `tenant_isolation` policy, on all 7
+   tenant tables.
+
+In production any failure exits with `Refusing to start: …`. Elsewhere it
+logs warnings, so local setups keep working. Never "fix" a refusal by
+disabling RLS or granting BYPASSRLS; fix the role or the schema.
 
 ## One-time owner bootstrap (private)
 There is no default account or password anywhere in the codebase. Create the
@@ -62,6 +83,14 @@ Everyone else joins through an invitation (see "Members and invitations").
   migration** — the runner refuses to continue if a checksum changes; add a new
   numbered migration instead (see `004_rls_nullif` for the pattern).
 * Each migration runs in its own transaction and is rolled back atomically on error.
+* Every `up` and `down` run holds a PostgreSQL advisory lock
+  (`hashtextextended('genie.schema_migrations', 0)`) on one dedicated
+  connection. Concurrent runs therefore serialize: a second instance waits,
+  then finds nothing pending. The lock is released on success and on failure,
+  and disappears with the connection if the process dies.
+* `node apps/api/dist/db/cli.js status` is read-only and exits 2 if anything is
+  pending, modified or unknown. The CLI needs only `MIGRATION_DATABASE_URL`
+  (or `DATABASE_URL`), not the app's secrets.
 * Current set: `001_core` (users, tenants, memberships, sessions),
   `002_tenant_scoped` (RLS-protected tenant tables, model registry, same-tenant
   trigger), `003_seed_models` (placeholder registry rows), `004_rls_nullif`
@@ -243,7 +272,7 @@ rebuilds them against the same database.
 
 ## Tests
 ```bash
-npm test     # 89 integration tests, serial, against DATABASE_URL in apps/api/.env.test
+npm test     # 99 integration tests, serial, against DATABASE_URL in apps/api/.env.test
 ```
 The suite migrates the test database from whatever state it is in, truncates
 data between files, and in `migrations.test.ts` drops and recreates the schema.
@@ -290,11 +319,20 @@ bounds, and genie-hermes, genie-infra and genie-agent-factory stay private or
 behind authentication.
 
 ## Containers (review only — not deployed)
-`infra/Dockerfile.api` builds the API as a non-root image with no secrets baked
-in; `infra/docker-compose.yml` wires it to a PostgreSQL 16 service for local
-review using environment placeholders. Resource limits, health checks and
-persistent volumes are declared there for review. Running them against real
-infrastructure requires owner approval and the deployment steps in BUILD-SPEC.md.
+`infra/Dockerfile.api` builds genie-core as a non-root image with no secrets
+baked in. `.dockerignore` keeps `.env` files, keys, `node_modules`, build
+output, backups/dumps and uploads out of the build context. The install and
+prune are scoped to `@genie/api` + `@genie/contracts`, so a web workspace's
+dependencies never enter the image.
+
+`infra/docker-compose.yml` runs PostgreSQL 16 with separate roles:
+* the image superuser only runs `infra/db-init/01-genie-roles.sh` once;
+* a `migrate` job runs as `genie_owner`;
+* `api` runs as `genie_app` with `MIGRATE_ON_BOOT=false`, and starts only after
+  migrations succeed.
+
+Running any of this on real infrastructure requires owner approval; follow
+`docs/DEPLOYMENT.md`.
 
 ## What is deliberately NOT integrated
 * **Hermes**: the adapter is an honest stub (`availability: unavailable`); every

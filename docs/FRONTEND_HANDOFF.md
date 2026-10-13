@@ -6,12 +6,20 @@ For AI Studio (apps/web) and Codex reconciliation. Source of truth is
 example payloads for every endpoint are in `packages/contracts/fixtures/*.json`.
 If this page and the YAML ever disagree, the YAML wins — tell us.
 
-Status: backend implemented and integration-tested (89 tests) against
-PostgreSQL 16 with a **mock** agent adapter. Hermes is **not** integrated
-(readiness reports it `unavailable`). There is **no pricing-verification job
-yet, so in a real deployment every model is refused** (`409
-model_not_allowed`) — that is intended fail-closed behaviour, not a bug. n8n
-execution, provider usage/quota figures, email, voice, SEO, publishing and
+Status: backend implemented and integration-tested against PostgreSQL 16
+with a **mock** agent adapter. Hermes is **not** integrated (readiness reports
+it `unavailable`). The model pricing check works as follows:
+
+* **Implemented:** a server-side pricing sync (`models:sync`) that verifies
+  owner-approved OpenRouter models from OpenRouter's free public model list.
+* **Tested with sample data only:** this build environment cannot reach
+  `openrouter.ai`, so the sync has never processed the real feed. The first
+  real run must be a dry run on the server.
+* **Not yet usable:** the approved-model allowlist ships **empty**, so until an
+  owner approves a model and the sync runs, every model is refused (`409
+  model_not_allowed`). That is intended fail-closed behaviour, not a bug.
+
+n8n execution, provider usage/quota figures, email, voice, SEO, publishing and
 billing are not implemented. Nothing is deployed.
 
 ## Changes since the first handoff
@@ -350,10 +358,13 @@ for the tenant:
 | `trusted` | `unknown` | ✗ | ✗ |
 | `trusted` | `stale` (explicitly, or older than 72 h) | ✗ | ✗ |
 
-The `:free` suffix in a model id carries no weight. Only a server-side
-verification job can mark a row `trusted`; no API call can. None exists yet,
-so today every real model shows `allowed: false`. The agent model picker
-should list all rows, disable the not-allowed ones, and explain why using
+The `:free` suffix in a model id carries no weight. Only the server-side
+pricing sync can mark a row `trusted`; no API call can. The sync is
+implemented but has only been tested with sample data, and the allowlist is
+empty, so until an owner approves a model and the sync has run, every model
+shows `allowed: false`. Approved and synced models appear as `openrouter/<id>`
+with `verificationSource: 'trusted'`. The agent model picker should list all
+rows, disable the not-allowed ones, and explain why using
 `pricingStatus`/`verificationSource`.
 
 ## Health
