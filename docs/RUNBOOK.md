@@ -275,6 +275,20 @@ one-time hashed tokens, new and existing account flows, single use under
 concurrency, generic errors, rate limiting). Test model rows are written through
 `recordTrustedVerification`, standing in for the future verification job.
 
+## Planned hostnames (not provisioned)
+`docs/AGENT-DOMAINS.md` holds the owner-confirmed plan: genie-core (this API)
+at `api.genie.readyqr.com`, genie-command (UI) at `genie.readyqr.com`, plus the
+other agents, each in its own private repo and Coolify service. When deployment
+is approved, the expected settings for option A (same-origin proxy) are:
+* `ALLOWED_ORIGINS=https://genie.readyqr.com`
+* `TRUSTED_PROXIES=<the reverse proxy's address or CIDR on VPS 2>`
+* `NODE_ENV=production`, so cookies are `Secure`; cookies stay host-only (never
+  set a parent `Domain`).
+
+Nothing here authorizes DNS, TLS, Coolify or VPS changes. VPS 1 is out of
+bounds, and genie-hermes, genie-infra and genie-agent-factory stay private or
+behind authentication.
+
 ## Containers (review only — not deployed)
 `infra/Dockerfile.api` builds the API as a non-root image with no secrets baked
 in; `infra/docker-compose.yml` wires it to a PostgreSQL 16 service for local

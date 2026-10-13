@@ -46,6 +46,16 @@ billing are not implemented. Nothing is deployed.
   `apps/api/config/approved-models.json` and the server-side pricing sync runs.
   Until then every model still shows `allowed: false`.
 
+## Planned hostnames and the origin question
+Planned (not provisioned) names from `docs/AGENT-DOMAINS.md`: the UI
+(genie-command) at `genie.readyqr.com`, this API (genie-core) at
+`api.genie.readyqr.com`. The API currently requires the browser to reach it on
+the **same origin** as the app: it sends no CORS headers, and its session and
+CSRF cookies are host-only. Until the owner and Codex pick an option in
+AGENT-DOMAINS.md, build the app to call a **relative** `/api/v1` base URL
+(option A: `genie.readyqr.com` proxies `/api/*` to genie-core). Don't
+hard-code `https://api.genie.readyqr.com` in the browser bundle.
+
 ## Transport conventions
 
 | Thing | Value |

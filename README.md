@@ -19,9 +19,12 @@ shared API contract** for the first vertical-slice milestone.
 | `apps/web/` | AI Studio | React/TypeScript/Vite frontend (not in this repo yet; integrate via `docs/FRONTEND_HANDOFF.md`) |
 | Hermes adapter | Codex | `apps/api/src/adapters/HermesAdapter.ts` is a placeholder for Codex's reviewed implementation |
 | `infra/` | review only | Container definitions; deployment needs owner approval |
-| `docs/` | — | Runbook, frontend handoff |
+| `docs/` | — | Runbook, frontend handoff, planned agent domains (`AGENT-DOMAINS.md`) |
 
 Contract changes are agreed between owners before either side changes code.
+
+Planned hostnames for every Genie agent (not provisioned) are in
+`docs/AGENT-DOMAINS.md`: this backend is genie-core → `api.genie.readyqr.com`.
 
 ## Quick start (local)
 ```bash
