@@ -6,9 +6,11 @@ authentication, tenant isolation, policy enforcement, task persistence, audit
 history and the UI. This repository currently contains the **backend and the
 shared API contract** for the first vertical-slice milestone.
 
-> Not production-ready. Nothing in this repo is deployed. The Hermes adapter is
-> an honest "unavailable" stub pending Codex's verification of a supported
-> programmatic interface. See `docs/RUNBOOK.md` → "What is deliberately NOT integrated".
+> Not production-ready. An auth-only public test runs on VPS 2 with Hermes
+> disabled. The Hermes API server has been verified as the supported interface,
+> and a constrained, tool-free, single-tenant client is implemented and tested
+> locally. It stays disabled until the blockers in `docs/HERMES.md` are cleared
+> and the owner approves.
 
 ## Layout and ownership
 
@@ -17,9 +19,9 @@ shared API contract** for the first vertical-slice milestone.
 | `packages/contracts/` | Claude Code | `openapi.yaml` (source of truth), `@genie/contracts` TypeScript types + permission matrix, safe fixtures |
 | `apps/api/` | Claude Code | Fastify + TypeScript + PostgreSQL backend, SQL migrations, integration tests |
 | `apps/web/` | AI Studio | React/TypeScript/Vite frontend (not in this repo yet; integrate via `docs/FRONTEND_HANDOFF.md`) |
-| Hermes adapter | Codex | `apps/api/src/adapters/HermesAdapter.ts` is a placeholder for Codex's reviewed implementation |
+| Hermes adapter | Codex (review) | `HermesApiAdapter.ts` (constrained client, disabled by default) and `HermesAdapter.ts` (unavailable stub); see `docs/HERMES.md` |
 | `infra/` | review only | Container definitions; deployment needs owner approval |
-| `docs/` | — | Runbook, frontend handoff, planned agent domains (`AGENT-DOMAINS.md`) |
+| `docs/` | — | Runbook, deployment, Hermes verification (`HERMES.md`), frontend handoff, planned agent domains (`AGENT-DOMAINS.md`) |
 
 Contract changes are agreed between owners before either side changes code.
 
@@ -41,7 +43,7 @@ npm run dev                                # http://localhost:4000/api/v1/health
 cp apps/api/.env.test.example apps/api/.env.test   # point at a disposable DB
 npm test
 ```
-99 integration tests run serially against a real PostgreSQL 16 database using a
+111 integration tests run serially against a real PostgreSQL 16 database using a
 mock agent adapter; details and coverage list in `docs/RUNBOOK.md`.
 
 ## Guarantees implemented and tested

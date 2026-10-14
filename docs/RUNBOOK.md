@@ -230,39 +230,68 @@ single-use under concurrency and rate limited per client address (20 failures
 per 15 minutes, same settings as login).
 
 ## Backups and restore rehearsal
-Tenant tables use `FORCE ROW LEVEL SECURITY`, so **the application role cannot
-take a backup**: `pg_dump` as `genie` fails with "query would be affected by
-row-level security policy". This is the safe failure. Never use
-`--enable-row-security`, which silently dumps zero tenant rows. Create a
-dedicated read-only backup role once (run as a superuser; BYPASSRLS requires one):
-```sql
-CREATE ROLE genie_backup LOGIN BYPASSRLS PASSWORD '<from your secret store>';
-GRANT CONNECT ON DATABASE genie TO genie_backup;
-GRANT USAGE ON SCHEMA public TO genie_backup;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO genie_backup;
-ALTER DEFAULT PRIVILEGES FOR ROLE genie IN SCHEMA public GRANT SELECT ON TABLES TO genie_backup;
-```
-Then:
+Tenant tables use `FORCE ROW LEVEL SECURITY`, so **only the backup role can
+take a backup**: `pg_dump` as `genie_app` or `genie_owner` fails with "query
+would be affected by row-level security policy". This is the safe failure.
+Never use `--enable-row-security`, which silently dumps zero tenant rows. The
+backup role `genie_backup` (read-only, BYPASSRLS) is created by
+`infra/db/provision-roles.sql`; see `docs/DEPLOYMENT.md` §3.
+
 ```bash
 # Backup: custom-format dump + .sha256. Connection via libpq env vars, so no password on the command line.
 PGHOST=... PGUSER=genie_backup PGDATABASE=genie BACKUP_DIR=/var/backups/genie infra/scripts/backup-db.sh
 # Copy BOTH files off-server (e.g. restic or rclone to object storage). The script uploads nothing.
-
-# Rehearsal: verify checksum, restore into a NEW scratch DB, check migrations,
-# RLS 7/7, row counts (optionally vs the live DB), then drop the scratch DB.
-PGHOST=... PGUSER=<admin> COMPARE_DATABASE=genie infra/scripts/restore-rehearsal.sh /var/backups/genie/genie-<stamp>.dump
 ```
-The admin role needs CREATEDB and must bypass RLS (a superuser is simplest),
-and the application roles must exist on the target server. Rehearse before any
-live customer data, and after every schema change. `CREDENTIAL_ENCRYPTION_KEY`
-is **not** in the database backup: keep it in the secret store, backed up
-separately. Without it, restored provider credentials cannot be decrypted (users
-re-enter them).
 
-Verified locally: backup through a least-privilege `genie_backup` role, then
-restore rehearsal with all checks passing and row counts equal to the source; a
-corrupted dump is rejected at the checksum step; no scratch database is left
-behind.
+**Restore rehearsal runs on a disposable copy, never beside production.**
+`restore-rehearsal.sh` connects as a superuser of a throwaway PostgreSQL server
+and refuses to run if that server holds any database other than `postgres`,
+`template0/1` and earlier `genie_restore_*` scratch copies, so it cannot run on
+the production server. For example:
+```bash
+docker run --rm -d --name genie-rehearsal -e POSTGRES_PASSWORD="$(openssl rand -hex 16)" \
+  -p 127.0.0.1:55432:5432 postgres:16.6-bookworm
+PGHOST=127.0.0.1 PGPORT=55432 PGUSER=postgres PGPASSWORD=<that password> \
+  infra/scripts/restore-rehearsal.sh /var/backups/genie/genie-<stamp>.dump
+docker stop genie-rehearsal   # --rm deletes it
+```
+The rehearsal:
+1. verifies the checksum;
+2. proves the server is disposable;
+3. creates the Genie roles there as NOLOGIN, with production attributes, and
+   refuses a `genie_app` that is a superuser or BYPASSRLS;
+4. restores into a new scratch database;
+5. checks the applied migrations against this checkout;
+6. checks that RLS is enabled and forced with the `tenant_isolation` policy on
+   7/7 tables;
+7. reads every tenant table **as `genie_app`**: 0 rows without a tenant
+   context, and exactly one tenant's own rows with it set;
+8. prints row counts, then drops the scratch database.
+
+To compare the counts with the source, add `COMPARE_PGHOST`, `COMPARE_PGPORT`,
+`COMPARE_PGUSER=genie_backup`, `COMPARE_PGDATABASE=genie` (and
+`COMPARE_PGPASSWORD` or `~/.pgpass`). That connection is separate and
+read-only, and the comparison is meaningful only if nothing was written since
+the backup.
+
+Rehearse before any live customer data, and after every schema change.
+`CREDENTIAL_ENCRYPTION_KEY` is **not** in the database backup: keep it in the
+secret store, backed up separately. Without it, restored provider credentials
+cannot be decrypted (users re-enter them).
+
+Verified locally on two separate throwaway PostgreSQL 16 servers (a source and
+a disposable target):
+* A backup as `genie_app` failed and left no partial file.
+* A backup as `genie_backup` succeeded.
+* The rehearsal passed with all counts equal to the source and no scratch
+  database left behind.
+* It refused each of these:
+  * the source server itself (it hosts `genie`);
+  * a non-superuser;
+  * a masked `PGPASSWORD`;
+  * a `genie_app` with BYPASSRLS;
+  * a dump with FORCE RLS removed from one table;
+  * a dump whose tenant policy was rewritten to `USING (true)`.
 
 ## Restart / persistence
 All state (sessions, tasks, approvals, audit history) is in PostgreSQL; the API
@@ -272,7 +301,7 @@ rebuilds them against the same database.
 
 ## Tests
 ```bash
-npm test     # 99 integration tests, serial, against DATABASE_URL in apps/api/.env.test
+npm test     # 111 integration tests, serial, against DATABASE_URL in apps/api/.env.test
 ```
 The suite migrates the test database from whatever state it is in, truncates
 data between files, and in `migrations.test.ts` drops and recreates the schema.
@@ -335,9 +364,11 @@ Running any of this on real infrastructure requires owner approval; follow
 `docs/DEPLOYMENT.md`.
 
 ## What is deliberately NOT integrated
-* **Hermes**: the adapter is an honest stub (`availability: unavailable`); every
-  submission through it fails visibly. Codex owns verifying a programmatic
-  interface before `HermesAdapter` gets a real implementation.
+* **Hermes**: disabled. The official Hermes API server was verified from its
+  source, and a constrained client (`HermesApiAdapter`: tool-free, single
+  tenant, exact free model, stateless) is implemented and tested against a
+  stand-in. It stays off (the honest stub reports `unavailable`) until the
+  blockers in `docs/HERMES.md` are cleared and the owner approves.
 * **n8n execution, provider usage/quota, email, voice, SEO, publishing, billing**:
   not implemented; `Model.usage` is always `null`.
 * **Live pricing feed**: the OpenRouter sync is built and tested with fixtures

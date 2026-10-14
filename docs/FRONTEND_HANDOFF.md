@@ -278,11 +278,18 @@ The accept call is Origin-checked like login and rate limited per address.
    connection or config before the decision, approving returns `409
    approval_payload_mismatch`: show "The agent changed after this request;
    submit the task again".
-4. If `requiresApproval` is `false`, the task runs synchronously through the
-   adapter inside the same request; the 202 body already shows the final status
-   (`succeeded`/`failed`). With Hermes not integrated, a production-configured
-   API returns `failed` with a visible error, never a fake result. **Poll
-   `GET …/tasks/{id}` anyway** — the contract allows `queued`/`running`.
+4. If `requiresApproval` is `false`, the task is dispatched inside the same
+   request. With Hermes disabled (today), a production API returns `failed`
+   with a visible error, never a fake result. With the Hermes adapter enabled
+   (`docs/HERMES.md`), runs are asynchronous: the 202 body shows `running`.
+   **Poll `GET …/tasks/{id}` while the status is `queued` or `running`** (for
+   example every 2 seconds, backing off). Each read asks Hermes for that run
+   and settles the task. The list endpoint does not settle tasks. A Hermes
+   result is `{ text, servedBy: { adapter, provider, model }, usage? }`, where
+   `usage` is `{ reportedBy: 'hermes', unit: 'tokens', input, output, total }`
+   as reported by Hermes, not estimated. Hermes accepts only `chat` tasks with
+   input `{ prompt }`, and only for the one tenant it is enabled for. Other
+   tasks fail with a readable error; show it as is.
 5. Approve → decision recorded (immutable, `decidedBy/At` set) → task runs →
    `succeeded`/`failed`. Reject → task `cancelled`, `error = "rejected: <reason>"`.
    Immediately before any adapter call the server re-checks, against current
@@ -370,8 +377,9 @@ rows, disable the not-allowed ones, and explain why using
 ## Health
 `GET /health/live` → `200 {data:{status:'ok'}}`. `GET /health/ready` → `200` or
 `503 degraded` with per-dependency `checks`; today `agentAdapter` is
-`unavailable` until Codex verifies a Hermes programmatic interface. Show that
-state honestly in Integrations/Overview; do not label execution as available.
+`unavailable` while Hermes is disabled. The detail says why, e.g. a missing
+setting or a Hermes toolset being enabled. Show that state honestly in
+Integrations/Overview; do not label execution as available.
 
 ## Demo mode
 Keep demo fixtures isolated and labelled; never accept a credential in demo

@@ -12,24 +12,27 @@
 import pg from 'pg';
 import { migrateDown, migrateUp, migrationStatus } from './migrate.js';
 import { currentRole, unsafeRoleReasons } from './safety.js';
+import { withoutMaskedValues } from '../config.js';
 
 async function main() {
   const command = process.argv[2];
-  const url = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
+  // A masked value (__GENIE_NOT_AVAILABLE__) counts as unset.
+  const env = withoutMaskedValues(process.env);
+  const url = env.MIGRATION_DATABASE_URL || env.DATABASE_URL;
   if (!url) throw new Error('Set MIGRATION_DATABASE_URL (or DATABASE_URL) to the migration role connection string.');
   if (!['up', 'down', 'status'].includes(command ?? '')) {
     console.error('Usage: cli.js <up|down|status>');
     process.exitCode = 1;
     return;
   }
-  const ssl = process.env.DATABASE_SSL === 'true' || process.env.DATABASE_SSL === '1';
+  const ssl = env.DATABASE_SSL === 'true' || env.DATABASE_SSL === '1';
   const pool = new pg.Pool({ connectionString: url, ssl: ssl ? { rejectUnauthorized: true } : undefined, max: 2 });
   try {
     const role = await currentRole(pool);
     const reasons = unsafeRoleReasons(role);
     if (reasons.length && command !== 'status') {
       const msg = `Migration role "${role.name}" is unsafe: ${reasons.join('; ')}. Tables must be owned by a non-superuser, non-BYPASSRLS migration role (see docs/DEPLOYMENT.md).`;
-      if (process.env.NODE_ENV === 'production') throw new Error(`Refusing to migrate. ${msg}`);
+      if (env.NODE_ENV === 'production') throw new Error(`Refusing to migrate. ${msg}`);
       console.warn(`WARNING: ${msg}`);
     }
     if (command === 'up') {

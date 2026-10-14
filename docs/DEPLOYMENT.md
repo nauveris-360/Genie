@@ -68,8 +68,24 @@ genie-core ──private network──▶ PostgreSQL 16 (no published port)
 | `SESSION_TTL_MINUTES` | `720` | |
 | `LOGIN_RATE_LIMIT_WINDOW_SECONDS` / `LOGIN_MAX_FAILURES_PER_IP` / `LOGIN_MAX_FAILURES_PER_IP_ACCOUNT` | `900` / `20` / `5` | Defaults |
 | `MODEL_PRICING_MAX_AGE_HOURS` | `72` | |
-| `HERMES_ENABLED` | `false` | `HERMES_BASE_URL` and `HERMES_API_KEY` are unused by the stub; leave them **empty** |
+| `HERMES_ENABLED` | `false` | Keep `false` until every blocker in `docs/HERMES.md` is cleared and the owner approves. `HERMES_BASE_URL`, `HERMES_API_KEY` and `HERMES_TENANT_ID` are then required; with `false` they are ignored (mask them) |
 | `DEFAULT_ALLOW_PAID_FALLBACK` | unset | Currently unused: every tenant's policy defaults to OFF in the database |
+
+### Masked values (Coolify 4.4.6)
+
+Coolify injects the whole stack `.env` into every container. A `null` entry
+inherits a value, and an empty string is overwritten from saved values, so
+blanking a key does not remove it. Keys a container must not receive are set
+to `__GENIE_NOT_AVAILABLE__` instead. Genie (the API, the migration CLI and
+owner bootstrap) treats that exact value as **unset**:
+
+* a masked required setting fails at startup as "missing";
+* a masked optional setting takes its default (a masked `TRUSTED_PROXIES`
+  means "trust no proxy");
+* the masked value is never used as a key, password, URL or address.
+
+`infra/scripts/backup-db.sh` and `restore-rehearsal.sh` refuse to run if any
+of their `PG*` settings is masked.
 
 ## 3. Database roles
 
@@ -200,11 +216,14 @@ migrations its build does not know.
   Hermes is unavailable).
 * **`SESSION_COOKIE_SECRET` is required but unused.**
 * **No backups are scheduled yet.** Use test data only until backups and a
-  restore rehearsal exist on VPS 2.
+  restore rehearsal exist on VPS 2. Rehearse restores on a **disposable**
+  PostgreSQL server (`restore-rehearsal.sh` refuses any server that hosts
+  other databases, including production); see `docs/RUNBOOK.md`.
 
 ## 6. What was actually verified (locally, PostgreSQL 16, no Docker daemon)
 
-* **Integration suite:** all 99 tests pass. This includes:
+* **Integration suite:** all 111 tests pass (99 at a290196, plus 12 for the
+  constrained Hermes adapter; see `docs/HERMES.md`). This includes:
   * the startup gate (unsafe roles refused before any migration, RLS
     tampering detected, pending/modified/unknown migrations refused);
   * advisory-lock serialization (4 concurrent runners, lock waiting,

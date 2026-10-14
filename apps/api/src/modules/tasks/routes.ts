@@ -56,7 +56,8 @@ export async function taskRoutes(app: FastifyInstance, opts: { tasks: TaskServic
     const auth = requireUser(request);
     const { tenantId, taskId } = request.params as { tenantId: string; taskId: string };
     const ctx = await requireTenantPermission(auth.user.id, tenantId, 'task:read');
-    const row = await opts.tasks.get(ctx.tenantId, taskId);
+    // A running task is settled from its adapter run on read; see TaskService.refresh.
+    const row = await opts.tasks.refresh(ctx.tenantId, taskId);
     if (!row) throw errors.notFound('Task');
     return { data: toTask(row) };
   });

@@ -1,6 +1,22 @@
 import { isIP } from 'node:net';
 import { parseAllowedOrigins } from './auth/originCheck.js';
 
+/**
+ * Value the deployment uses to mask a key that a container must not receive.
+ * Coolify 4.4.6 injects the whole stack .env into every container, inherits
+ * values for null entries and overwrites empty strings from saved values, so an
+ * unneeded secret is set to this sentinel instead of being left blank. Genie
+ * treats it exactly like an unset variable: a required setting then fails with
+ * "missing", an optional one takes its default, and the sentinel itself is
+ * never used as a key, URL or address.
+ */
+export const MASKED_ENV_VALUE = '__GENIE_NOT_AVAILABLE__';
+
+/** Returns a copy of env without masked (sentinel) values. */
+export function withoutMaskedValues(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([, v]) => v?.trim() !== MASKED_ENV_VALUE));
+}
+
 function required(name: string, value: string | undefined): string {
   if (!value || value.trim() === '') {
     throw new Error(`Missing required environment variable ${name}. Copy .env.example and fill it in.`);
@@ -69,12 +85,15 @@ export interface Config {
   hermesEnabled: boolean;
   hermesBaseUrl: string | undefined;
   hermesApiKey: string | undefined;
+  /** The one tenant allowed to dispatch through Hermes (Hermes runs on the platform's own provider credential). */
+  hermesTenantId: string | undefined;
 }
 
 let cached: Config | undefined;
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export function loadConfig(rawEnv: NodeJS.ProcessEnv = process.env): Config {
   if (cached) return cached;
+  const env = withoutMaskedValues(rawEnv);
   cached = {
     nodeEnv: env.NODE_ENV ?? 'development',
     port: Number(env.PORT ?? 4000),
@@ -98,6 +117,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     hermesEnabled: bool(env.HERMES_ENABLED, false),
     hermesBaseUrl: env.HERMES_BASE_URL || undefined,
     hermesApiKey: env.HERMES_API_KEY || undefined,
+    hermesTenantId: env.HERMES_TENANT_ID?.trim() || undefined,
   };
   return cached;
 }

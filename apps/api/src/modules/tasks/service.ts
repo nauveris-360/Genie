@@ -7,7 +7,7 @@ import { payloadDigest } from '../../lib/digest.js';
 import { scrubObject } from '../../lib/redaction.js';
 import { toIso } from '../../lib/time.js';
 import { decryptSecret } from '../../crypto/secretBox.js';
-import { AdapterUnavailableError, type AgentAdapter } from '../../adapters/AgentAdapter.js';
+import { AdapterUnavailableError, type AdapterStatus, type AgentAdapter } from '../../adapters/AgentAdapter.js';
 import { assertModelAllowed } from '../../policy/freeFirst.js';
 import { recordAudit } from '../auditEvents/write.js';
 import type { AgentRow } from '../agents/routes.js';
@@ -64,6 +64,14 @@ export function approvalDigest(version: number, task: Pick<TaskRow, 'tenant_id' 
     });
   }
   return null;
+}
+
+/** Maps an adapter status onto task fields; queued/running adapter states keep the task running. */
+function settle(status: AdapterStatus): { finalStatus: TaskStatus; result: Record<string, unknown> | null; error: string | null } {
+  if (status.state === 'succeeded') return { finalStatus: 'succeeded', result: scrubObject(status.result), error: null };
+  if (status.state === 'failed') return { finalStatus: 'failed', result: null, error: status.error };
+  if (status.state === 'cancelled') return { finalStatus: 'cancelled', result: null, error: null };
+  return { finalStatus: 'running', result: null, error: null };
 }
 
 export class TaskService {
@@ -225,17 +233,17 @@ export class TaskService {
       const credential = decryptSecret(dispatch.encryptedCredential, loadConfig().credentialEncryptionKey);
       const submitted = await this.adapter.submit({ taskId: row.id, tenantId, agentId: dispatch.agentId, type: row.type, modelId: dispatch.modelId, provider: dispatch.provider, credential, input: row.input });
       externalRef = submitted.externalRef;
-      const status = await this.adapter.status(externalRef);
-      if (status.state === 'succeeded') { finalStatus = 'succeeded'; result = scrubObject(status.result); }
-      else if (status.state === 'failed') { finalStatus = 'failed'; error = status.error; }
-      else if (status.state === 'cancelled') { finalStatus = 'cancelled'; }
-      else { finalStatus = 'running'; }
+      // Once submitted, the work exists on the adapter side: a failed first status
+      // check leaves the task running (with its reference) for refresh() to settle,
+      // instead of marking it failed while the run may still complete.
+      const status = await this.adapter.status(externalRef).catch((): AdapterStatus => ({ state: 'running' }));
+      ({ finalStatus, result, error } = settle(status));
     } catch (err) {
       finalStatus = 'failed';
       error = err instanceof AdapterUnavailableError ? err.message : 'adapter execution failed';
     }
 
-    return withTenant(tenantId, async (client) => {
+    const updated = await withTenant(tenantId, async (client) => {
       // A cancellation recorded while the adapter was working wins over the adapter's outcome.
       const { rows } = await client.query<TaskRow>(
         `UPDATE tasks SET status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE $3 END,
@@ -243,7 +251,42 @@ export class TaskService {
          WHERE id = $1 AND tenant_id = $2 RETURNING *`,
         [taskId, tenantId, finalStatus, result ? JSON.stringify(result) : null, error, externalRef],
       );
-      const updated = rows[0]!;
+      const row = rows[0]!;
+      await recordAudit(client, { tenantId, actorUserId: null, action: `task.${row.status}`, targetType: 'task', targetId: row.id, metadata: { adapter: this.adapter.name, error } });
+      return row;
+    });
+    // Cancelled while the submission was in flight: cancel() had no reference to stop yet, so stop the run now.
+    if (updated.status === 'cancelled' && externalRef && finalStatus === 'running') {
+      await this.adapter.cancel(externalRef).catch(() => undefined);
+    }
+    return updated;
+  }
+
+  /**
+   * Settles a running task whose adapter work finishes after dispatch returned
+   * (Hermes runs are asynchronous). Asks the adapter once for the run recorded
+   * on this tenant's task row; a terminal answer is written only if the task is
+   * still running with that same reference, so a cancellation recorded in the
+   * meantime wins. An adapter that cannot be reached leaves the task running.
+   */
+  async refresh(tenantId: string, taskId: string): Promise<TaskRow | null> {
+    const row = await this.get(tenantId, taskId);
+    if (!row || row.status !== 'running' || !row.external_ref) return row;
+    const externalRef = row.external_ref;
+    const status = await this.adapter.status(externalRef).catch(() => null);
+    if (!status || status.state === 'queued' || status.state === 'running') return row;
+    const { finalStatus, result, error } = settle(status);
+    return withTenant(tenantId, async (client) => {
+      const { rows } = await client.query<TaskRow>(
+        `UPDATE tasks SET status = $4, result = $5::jsonb, error = $6, updated_at = now()
+         WHERE id = $1 AND tenant_id = $2 AND status = 'running' AND external_ref = $3 RETURNING *`,
+        [taskId, tenantId, externalRef, finalStatus, result ? JSON.stringify(result) : null, error],
+      );
+      const updated = rows[0];
+      if (!updated) {
+        const { rows: current } = await client.query<TaskRow>('SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2', [taskId, tenantId]);
+        return current[0] ?? null;
+      }
       await recordAudit(client, { tenantId, actorUserId: null, action: `task.${updated.status}`, targetType: 'task', targetId: updated.id, metadata: { adapter: this.adapter.name, error } });
       return updated;
     });

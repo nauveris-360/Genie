@@ -3,7 +3,7 @@
 ## Ownership (do not cross without agreement)
 * Claude Code: `apps/api` (backend), `packages/contracts` (OpenAPI + shared types), database migrations.
 * AI Studio: the frontend (`apps/web`, not in this repo). Never edit frontend files.
-* Codex: integration coordination and the Hermes adapter (`apps/api/src/adapters/HermesAdapter.ts` stays an honest "unavailable" stub until Codex verifies a programmatic interface).
+* Codex: integration coordination and Hermes adapter review. The Hermes API server is the verified interface (`docs/HERMES.md`). `HermesApiAdapter.ts` (tool-free, single tenant, exact free model) is implemented but stays disabled (`HERMES_ENABLED=false`, honest "unavailable" stub) until the blockers in `docs/HERMES.md` are cleared and the owner approves.
 * Contract changes (`packages/contracts/openapi.yaml`, `src/types.ts`) are agreed with AI Studio/Codex and recorded in `docs/FRONTEND_HANDOFF.md`.
 
 ## Standing constraints
@@ -11,6 +11,8 @@
 * Never touch VPS 1 (production websites, n8n). New Genie services go on VPS 2, managed by Coolify.
 * Keep genie-hermes, genie-infra and genie-agent-factory private or behind authenticated access.
 * Database roles: the app runs as a non-superuser, non-BYPASSRLS runtime role. Migrations run as the schema-owner role. Never disable RLS or grant BYPASSRLS to make something work. The production startup gate (`apps/api/src/db/safety.ts`) enforces this; see `docs/DEPLOYMENT.md`.
+* Coolify masks unneeded keys as `__GENIE_NOT_AVAILABLE__`; Genie treats that value as unset everywhere (`withoutMaskedValues` in `apps/api/src/config.ts`). Keep it that way for any new setting or script.
+* Restore rehearsals run only on a disposable PostgreSQL server (`infra/scripts/restore-rehearsal.sh` refuses a server hosting other databases).
 * Pushes go to the working branch only; no pull request unless asked. The repo has no `main` branch yet.
 
 ## Planned domains

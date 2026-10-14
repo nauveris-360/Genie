@@ -17,11 +17,14 @@
 import { getPool, closePool } from '../db/index.js';
 import { hashPassword } from './password.js';
 import { normalizeEmail, slugify } from '../lib/strings.js';
+import { withoutMaskedValues } from '../config.js';
 
 async function main() {
-  const email = process.env.BOOTSTRAP_OWNER_EMAIL?.trim();
-  const password = process.env.BOOTSTRAP_OWNER_PASSWORD;
-  const tenantName = process.env.BOOTSTRAP_TENANT_NAME?.trim() || 'Primary';
+  // A masked value (__GENIE_NOT_AVAILABLE__) counts as unset, so it can never become the owner's password.
+  const env = withoutMaskedValues(process.env);
+  const email = env.BOOTSTRAP_OWNER_EMAIL?.trim();
+  const password = env.BOOTSTRAP_OWNER_PASSWORD;
+  const tenantName = env.BOOTSTRAP_TENANT_NAME?.trim() || 'Primary';
 
   if (!email || !email.includes('@')) {
     throw new Error('BOOTSTRAP_OWNER_EMAIL must be set to a valid email for this single invocation.');

@@ -14,8 +14,16 @@
 #
 #   PGHOST=... PGUSER=genie_backup PGDATABASE=genie BACKUP_DIR=/var/backups/genie \
 #     infra/scripts/backup-db.sh
+#
+# Then rehearse the restore on a DISPOSABLE server with restore-rehearsal.sh
+# (it refuses a server that hosts any other database).
 set -euo pipefail
 umask 077
+
+# A masked deployment value (Coolify stack .env) is never a usable setting.
+for v in PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE BACKUP_DIR; do
+  [ "${!v:-}" = '__GENIE_NOT_AVAILABLE__' ] && { echo "$v is masked (__GENIE_NOT_AVAILABLE__); set a real value or unset it." >&2; exit 2; }
+done
 
 : "${PGDATABASE:?set PGDATABASE (and PGHOST/PGUSER/PGPASSWORD or ~/.pgpass)}"
 : "${BACKUP_DIR:?set BACKUP_DIR to a local directory}"
