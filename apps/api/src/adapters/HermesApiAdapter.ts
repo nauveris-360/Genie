@@ -27,7 +27,10 @@ import { AdapterUnavailableError } from './AgentAdapter.js';
  *    (summarize, embed, title_generate) are not sent to Hermes.
  *  - Served model must match: a completed run must report that it was served by
  *    exactly the requested provider/model. A Hermes fallback-provider switch
- *    (or a missing report) fails the task and discards the output.
+ *    (or a missing report) fails the task and discards the output. This check
+ *    runs only after Hermes has finished the run, so it cannot prevent, stop or
+ *    refund usage a fallback model already incurred; only Hermes' own
+ *    configuration (docs/HERMES.md, "Preventive Hermes configuration") can.
  *  - Stateless: no session id, history, previous response or memory key is
  *    sent, so each run starts a fresh Hermes session.
  *  - The API key and base URL never appear in errors, readiness details, task
@@ -86,6 +89,32 @@ function fail(detail: string): never {
   throw new AdapterUnavailableError(detail);
 }
 
+/** The request may or may not have reached Hermes (connection failure or timeout). */
+class HermesTransportError extends AdapterUnavailableError {}
+
+/** Reads at most `max` characters of a response body; larger bodies are refused without buffering them. */
+async function readCapped(res: Response, max: number): Promise<string> {
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > max) {
+    await res.body?.cancel().catch(() => undefined);
+    fail('Hermes response was too large.');
+  }
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+    if (text.length > max) {
+      await reader.cancel().catch(() => undefined);
+      fail('Hermes response was too large.');
+    }
+  }
+  return text + decoder.decode();
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
@@ -142,10 +171,15 @@ export class HermesApiAdapter implements AgentAdapter {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch {
-      fail('Hermes API server is unreachable.');
+      throw new HermesTransportError('Hermes API server is unreachable.');
     }
-    const text = await res.text().catch(() => '');
-    if (text.length > MAX_RESPONSE_CHARS) fail('Hermes response was too large.');
+    let text: string;
+    try {
+      text = await readCapped(res, MAX_RESPONSE_CHARS);
+    } catch (err) {
+      if (err instanceof AdapterUnavailableError) throw err;
+      throw new HermesTransportError('Hermes API server is unreachable.');
+    }
     let json: unknown = null;
     try { json = text ? JSON.parse(text) : null; } catch { json = null; }
     return { status: res.status, json };
@@ -205,7 +239,18 @@ export class HermesApiAdapter implements AgentAdapter {
     this.cached = { at: Date.now(), value: problem ? { available: false, detail: problem } : { available: true, detail: 'Hermes API server reachable and authenticated; no toolsets enabled (tool-free chat only).' } };
     if (problem) fail(problem);
 
-    const res = await this.request('POST', '/v1/runs', { input: prompt, model, provider: 'openrouter' }, { 'idempotency-key': `genie-task-${s.taskId}` });
+    // A lost or failed response leaves it unknown whether Hermes created the run.
+    // Retrying once with the same Idempotency-Key is safe: Hermes replays the
+    // original run_id if the first request did create one, so there is still at
+    // most one run per Genie task.
+    const idempotencyKey = `genie-task-${s.taskId}`;
+    const startRun = () => this.request('POST', '/v1/runs', { input: prompt, model, provider: 'openrouter' }, { 'idempotency-key': idempotencyKey })
+      .catch((err: unknown) => { if (err instanceof HermesTransportError) return null; throw err; });
+    let res = await startRun();
+    if (res === null || res.status >= 500) res = await startRun();
+    if (res === null || res.status >= 500) {
+      fail(`Hermes did not confirm the run (${res === null ? 'no response' : `HTTP ${res.status}`}, twice). It may still have started on Hermes under idempotency key ${idempotencyKey}; check Hermes before resubmitting.`);
+    }
     if (res.status === 401 || res.status === 403) fail('Hermes rejected the configured API key.');
     if (res.status === 429) fail('Hermes is at its concurrent-run limit; try again later.');
     if (res.status === 409) fail('Hermes refused the run: idempotency key conflict.');

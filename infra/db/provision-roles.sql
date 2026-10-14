@@ -20,6 +20,15 @@
 --                can read every tenant's rows. Never give it to the app.
 \set ON_ERROR_STOP on
 
+-- A masked deployment value (__GENIE_NOT_AVAILABLE__) or a short password must
+-- never become a role password. position() is used, not LIKE: "_" is a LIKE wildcard.
+SELECT (position('__GENIE_NOT_AVAILABLE__' IN :'owner_pw' || :'app_pw' || :'backup_pw') > 0
+        OR least(length(:'owner_pw'), length(:'app_pw'), length(:'backup_pw')) < 16) AS genie_bad_pw \gset
+\if :genie_bad_pw
+  \echo 'Refusing: a Genie role password is masked (__GENIE_NOT_AVAILABLE__) or shorter than 16 characters.'
+  SELECT genie_role_passwords_rejected;
+\endif
+
 CREATE ROLE genie_owner  LOGIN PASSWORD :'owner_pw'  NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;
 CREATE ROLE genie_app    LOGIN PASSWORD :'app_pw'    NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;
 CREATE ROLE genie_backup LOGIN PASSWORD :'backup_pw' NOSUPERUSER BYPASSRLS   NOCREATEDB NOCREATEROLE NOREPLICATION;

@@ -92,15 +92,27 @@ disabled-agent check and the free-first policy re-run at dispatch time.
   `summarize`, `embed` and `title_generate` are never sent to Hermes.
 * **Served model must match.** A completed run must report
   `runtime.provider = openrouter` and `runtime.model` equal to the requested
-  model. Otherwise the output is discarded and the task fails visibly. This
-  catches a fallback switch after the fact; it cannot undo spending. That is
-  why Hermes-side precondition 2 below is required.
+  model. Otherwise the output is discarded and the task fails visibly.
+  **This check does not prevent spending.** It runs only after Hermes has
+  finished the run. By then any fallback or auxiliary model Hermes used has
+  already been called and, if it was paid, already billed to the account Hermes
+  holds. Genie can neither stop nor refund that. It also sees only the model
+  that produced the final answer, not Hermes' side calls (titles, compression,
+  vision). Prevention is Hermes' own configuration plus a provider-side
+  spending limit; see "Preventive Hermes configuration" below.
 * **Stateless.** No session id, history, previous response,
   `X-Hermes-Session-Id` or `X-Hermes-Session-Key` is sent, so each run starts a
   fresh Hermes session.
-* **Idempotent.** The `Idempotency-Key` is `genie-task-<taskId>`, so a retried
-  dispatch cannot start a second run. Genie's conditional claim already
-  prevents a duplicate dispatch.
+* **Idempotent.** The `Idempotency-Key` is `genie-task-<taskId>`. If the
+  response to `POST /v1/runs` is lost (connection cut, timeout) or is a 5xx,
+  Genie retries **once** with the same key. Hermes then replays the original
+  `run_id` if the first request created a run, so there is still at most one run
+  per task. If the retry also fails, the task fails with "Hermes did not confirm
+  the run (…). It may still have started on Hermes under idempotency key
+  genie-task-<id>". Genie cannot see or stop such a run. Genie's conditional
+  claim already prevents a duplicate dispatch.
+* **Bounded responses.** Hermes responses over 2,000,000 characters are refused,
+  whether the size is declared up front or only seen while streaming.
 * **No leaks.** Redirects are refused, so the key is never replayed to another
   host. Errors and readiness details never contain the key or URL. Hermes error
   text is cut to 200 single-line characters. Result: `{text, servedBy, usage}`,
@@ -116,19 +128,9 @@ disabled-agent check and the free-first policy re-run at dispatch time.
 1. **Codex verifies the VPS 2 install:** its version, and that
    `GET /v1/capabilities` reports `run_submission`, `run_status` and `run_stop`
    with `auth.required: true`.
-2. **Codex verifies the Hermes configuration on VPS 2.** Genie cannot check
-   these over the API:
-   * no toolsets enabled for the `api_server` platform, and **no MCP servers**
-     configured;
-   * **no fallback providers** (no `fallback_model` chain);
-   * auxiliary tasks: `auxiliary.title_generation.enabled: false`, and
-     compression, vision and any other auxiliary task either disabled or pinned
-     to a model on Genie's verified-free allowlist;
-   * memory off: `memory.memory_enabled: false`, `user_profile_enabled: false`,
-     no Honcho provider;
-   * `API_SERVER_HOST` bound to loopback or the private Docker network only,
-     `API_SERVER_CORS_ORIGINS` unset, and a dedicated `API_SERVER_KEY`
-     (16+ random characters) that is used nowhere else.
+2. **Codex verifies the Hermes configuration on VPS 2** against every item in
+   "Preventive Hermes configuration" below. Genie can check only the toolset
+   item over the API.
 3. **Owner decision on credentials:** Hermes will run on the platform's own
    OpenRouter key, for the one bound tenant only. Multi-tenant Hermes means one
    Hermes profile per tenant; that is not designed or implemented.
@@ -138,14 +140,62 @@ disabled-agent check and the free-first policy re-run at dispatch time.
    never exposed publicly (hermes.genie.readyqr.com stays private or behind
    authenticated access).
 6. **A real tool-free smoke test**, which BUILD-SPEC requires explicit
-   authorization for.
+   authorization for. It must also confirm that a completed run reports
+   `runtime.provider` and `runtime.model` in exactly the form Genie sends: the
+   OpenRouter id without the `openrouter/` prefix, e.g. `vendor/model:free`.
+   The Hermes source suggests it does, but this has not been observed on a real
+   run. If the form differs, every run is discarded (safe, but unusable) and
+   the comparison needs a reviewed change.
 
 Until then, production keeps `HERMES_ENABLED=false`. Readiness then reports
 `agentAdapter: unavailable`, and every task fails visibly.
 
+## Preventive Hermes configuration (required before enabling)
+
+This is what actually stops Hermes from spending money, using tools or
+carrying data between runs. Genie's checks only detect some violations after
+the fact. Every item applies to the Hermes profile whose API server Genie
+calls, and Codex verifies each one on VPS 2. Key names are from Hermes'
+documentation (main branch, October 2026); confirm them against the installed
+version.
+
+| # | Requirement | Hermes setting | Why | Genie can verify? |
+| --- | --- | --- | --- | --- |
+| 1 | No tools for API runs | `hermes tools`: nothing enabled for the `api_server` platform (`platform_toolsets`) | API runs otherwise get terminal, file, web and other tools | **Yes**, preflight on every dispatch via `GET /v1/toolsets` |
+| 2 | No MCP servers | no `mcp_servers` entries | `/v1/toolsets` does not list default MCP servers | No |
+| 3 | No main-model fallback | no top-level `fallback_providers` list, and no legacy `fallback_model` | Hermes otherwise switches provider or model on errors **before** Genie sees anything | Only after the run, and only for the final answer |
+| 4 | Main model is the free model | `model.provider: openrouter`, `model.default` = the verified-free OpenRouter id Genie dispatches | Auxiliary tasks on `auto` use the main model, and the auxiliary capacity-error "safety net" falls back to it even when a task is pinned elsewhere | No |
+| 5 | No paid auxiliary calls | `auxiliary.title_generation.enabled: false`; every other `auxiliary.<task>` (`compression`, `vision`, `skills_hub`, `mcp`, `approval`, `review`, `triage_specifier`, `curator`, …) left on `auto` (= item 4) or pinned to a verified-free model; **no** `auxiliary.<task>.fallback_chain` entries | Side calls are billed like chat and are invisible to Genie | No |
+| 6 | No model routes | no `gateway.api_server.model_routes` (or `platforms.api_server.model_routes`) | A route alias matching the requested model could pin other credentials or a base URL | No |
+| 7 | No memory | `memory.memory_enabled: false`, `memory.user_profile_enabled: false`, no `memory.provider` (e.g. Honcho) | Memory is per profile and would carry content between runs | No |
+| 8 | No private context files | no `SOUL.md`, `AGENTS.md`, `.hermes.md`, `CLAUDE.md` or `.cursorrules` with private content in the Hermes account's home or the gateway's working directory | They are injected into the system prompt and can surface in answers | No |
+| 9 | Private, authenticated API | `API_SERVER_ENABLED=true`; `API_SERVER_HOST` loopback or the private Docker network only; dedicated random `API_SERVER_KEY` (16+ chars, used nowhere else); `API_SERVER_CORS_ORIGINS` unset | The API server can run whatever the profile allows | Partly: auth required (preflight), no redirects |
+| 10 | Provider-side spending cap | a dedicated OpenRouter key for this Hermes profile; if the account offers a per-key credit or spend limit, set it to zero | The only control that still stops spending if items 3–6 are ever wrong | No. Owner action; a provider-account change needs owner approval |
+
+With items 1–9 in place, the remaining Genie-side check (served model equals
+requested model) is a tripwire. It is not a spending control.
+
+## Edge cases and known limits
+
+* **Check, then run.** Toolsets are checked just before each run starts. A
+  Hermes configuration change between that check and the run, or during the
+  run, is not detected.
+* **Unconfirmed submission.** After a failed retry (see "Idempotent"), the run
+  may exist on Hermes without Genie knowing its id.
+* **Hermes restarts.** Hermes marks an active run `interrupted`; Genie fails
+  the task.
+* **Status retention.** Runs are polled by id. Hermes keeps idempotent run
+  status for about 24 hours; after that a still-unsettled task fails with
+  "Hermes no longer has a record of this run."
+* **Read amplification.** Each `GET …/tasks/{id}` of a running task makes one
+  Hermes status request, so the frontend should poll no faster than every 2
+  seconds. The task list does not settle tasks.
+* **Usage.** Usage is whatever Hermes reports for the run, labelled as such.
+  It excludes Hermes' auxiliary calls and is not a cost figure.
+
 ## Tests run (local, stand-in Hermes server, no model calls)
 
-`apps/api/test/integration/hermesAdapter.test.ts`, 12 tests:
+`apps/api/test/integration/hermesAdapter.test.ts`, 16 tests:
 
 * **Preflight:** readiness is unavailable for any enabled or unlabelled toolset,
   for auth not required, a missing run feature, a redirect (not followed, key
@@ -179,10 +229,19 @@ Until then, production keeps `HERMES_ENABLED=false`. Readiness then reports
   never the value. A masked required secret fails like a missing one.
 * **Fresh preflight per dispatch:** this holds even while readiness serves a
   cached "ok".
+* **Unconfirmed submission:** a lost response is retried once with the same
+  key and adopts the single run Hermes created. Two 5xx responses fail visibly
+  and say the run may exist. One 5xx is absorbed.
+* **Oversized responses** are refused, both declared and streamed.
+* **Sentinel inside a value:** a connection string or URL containing
+  `__GENIE_NOT_AVAILABLE__` counts as masked, and a required setting then fails
+  as "missing (… masked …)".
 * **Races:**
   * a cancellation recorded during a status check wins;
   * a cancellation recorded while a submission is in flight also stops the
     run Hermes accepted.
 
-Thirteen of these guarantees were confirmed by mutation: disabling each one in the code
-made the matching test fail.
+Sixteen of these guarantees were confirmed by mutation: disabling each one in
+the code made the matching test fail. The early refusal of a body declared as
+too large is not separately detected, because the streaming cap still refuses
+it; it is defence in depth.

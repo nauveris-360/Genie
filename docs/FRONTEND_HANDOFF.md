@@ -23,6 +23,9 @@ n8n execution, provider usage/quota figures, email, voice, SEO, publishing and
 billing are not implemented. Nothing is deployed.
 
 ## Changes since the first handoff
+* Tasks can now stay `running` after the 202 (Hermes runs are asynchronous);
+  reading `GET …/tasks/{id}` settles them. See "Task polling, results and
+  errors" for the polling, result and error contract.
 * `POST /auth/login` is rate limited → `429 rate_limited` with `Retry-After`
   header and `error.retryAfterSeconds`.
 * `ErrorEnvelope.error.retryAfterSeconds?: number` (only on 429).
@@ -350,6 +353,94 @@ v2:
 {"agent":{"config":{"tone":"formal"},"modelId":"openrouter/example-model:free","providerConnectionId":"66666666-6666-4666-8666-666666666661"},"agentId":"77777777-7777-4777-8777-777777777771","input":{"options":{"a":1,"b":2},"prompt":"Post this reply to the live ticket."},"tenantId":"44444444-4444-4444-8444-444444444444","type":"chat","v":2,"websiteId":null}
 → 11fc72f9537a257e3ab4477ecf289e62b6bc4c561e3c2fc39db3d72d3096e25f
 ```
+
+## Task polling, results and errors (summary for AI Studio)
+
+No contract change: these are the existing `Task` fields and endpoints, with
+the behaviour you can rely on.
+
+**Submit.** `POST /api/v1/tenants/{tenantId}/tasks` with:
+* headers `X-CSRF-Token` and `Idempotency-Key` (1–200 chars). Generate a new
+  UUID per user action, and **reuse the same key** when retrying that same
+  submission after a network error;
+* body `{ agentId, websiteId?, type, input }`. For chat: `type: "chat"`,
+  `input: { prompt: "<text>" }` (no other input fields when Hermes runs it).
+
+Responses:
+
+| Status | Meaning | UI |
+| --- | --- | --- |
+| `202 { data: Task }` | The persisted task, whatever its status (including `failed`) | Open the task view and poll if not terminal |
+| `202`, same task as before | Same key and same payload: no new task was created | Show the existing task |
+| `400 validation_error` | Bad body or missing key | Show the message |
+| `401 unauthorized` | Session expired | Go to sign-in |
+| `403 forbidden` / `csrf_mismatch` | Role cannot submit; stale CSRF cookie | Hide the action / reload |
+| `404 not_found` | Agent or website not in this tenant | Refresh lists |
+| `409 idempotency_key_conflict` | Same key, different payload | Generate a new key |
+| `409 model_not_allowed` | Free-first policy refused the agent's model; the message says why | Show it; link to Agents / Model policy |
+
+**Statuses.**
+* Non-terminal: `queued`, `running`, and `awaiting_approval` (waits for a
+  human decision).
+* Terminal: `succeeded`, `failed`, `cancelled`.
+
+**Polling.** While the open task is `queued` or `running`, poll `GET
+/api/v1/tenants/{tenantId}/tasks/{taskId}`:
+* every 2 s for the first 30 s, then every 5–10 s;
+* stop on a terminal status or when the view closes;
+* never faster than every 2 s: each read of a running task makes one
+  server-side Hermes status call;
+* poll only the task the user has open. `GET …/tasks` (the list) does **not**
+  settle running tasks.
+
+There is no server-side time limit. After a minute, show "Still running" with
+a Cancel button. While Hermes is unreachable a task stays `running`, not
+failed. For `awaiting_approval`, poll the task (or the approvals list) every
+5–10 s; it moves to `running`/terminal after approval and to `cancelled` after
+rejection.
+
+**Result** (non-null only when `succeeded`). Render all text as **plain text**
+(model output is untrusted; never inject it as HTML or Markdown-to-HTML
+without sanitizing):
+
+| Adapter | `result` |
+| --- | --- |
+| Hermes | `{ text: string, servedBy: { adapter: 'hermes', provider: 'openrouter', model: string }, usage?: { reportedBy: 'hermes', unit: 'tokens', input: number\|null, output: number\|null, total: number\|null } }` |
+| Mock (local and tests only) | `{ text: string }` |
+
+Label `usage` as "reported by Hermes". It is not a cost and does not include
+Hermes' side calls. Do not show a remaining free balance; none exists.
+
+**Error** (`error` string; set when `failed`, and when `cancelled` by an
+approval rejection as `rejected` / `rejected: <reason>`).
+* Display it verbatim as plain text.
+* Treat it as opaque, except the stable prefix `Blocked before dispatch: `.
+  That prefix means a policy, approval or agent check failed before anything
+  was sent. The user can fix the agent, model or policy and submit again with
+  a new key.
+
+Messages you may see today:
+
+| Message (start) | Meaning |
+| --- | --- |
+| `Hermes programmatic interface not configured…` / `HERMES_ENABLED=true but Hermes is not configured…` | Hermes is disabled (the current state) |
+| `Hermes is not enabled for this tenant.` | Hermes serves one designated tenant only |
+| `Hermes is used for tool-free chat only; <type> tasks…` | Only `chat` runs on Hermes |
+| `Hermes chat input must be exactly { "prompt": "<text>" }.` | Extra input fields were sent |
+| `Hermes has toolsets enabled…` / `Hermes rejected the configured API key.` / `Hermes API server is unreachable.` | Operator problem; show as "Execution unavailable" |
+| `Hermes did not confirm the run (…)` | Submission outcome unknown; do **not** auto-resubmit with a new key |
+| `Hermes served the run with … output discarded.` / `Hermes did not report which model served the run…` | A different model answered; nothing is shown |
+| `Hermes asked to use a tool…` | The run was stopped; tools are not allowed |
+| `Hermes run failed: …` / `Hermes run interrupted…` / `Hermes no longer has a record of this run.` | The run failed on Hermes |
+
+**Cancel.** `POST …/tasks/{taskId}/cancel` (CSRF) returns `200 { data: Task }`
+with `cancelled`. It is a no-op on an already cancelled task, and returns
+`409 task_not_cancellable` once `succeeded`/`failed`. A cancel always wins
+over a later Hermes completion.
+
+**Execution availability.** Read `GET /api/v1/health/ready` →
+`data.checks.agentAdapter.{status, detail}`. Today it is `unavailable` with a
+reason; show execution as unavailable rather than hiding tasks.
 
 ## Free-first policy (what the UI should expect)
 

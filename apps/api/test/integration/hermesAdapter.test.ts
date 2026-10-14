@@ -33,9 +33,15 @@ const fake = {
   capabilities: {} as Record<string, unknown>,
   statusDown: false,
   redirectCapabilities: false,
+  /** How many upcoming POST /v1/runs to answer badly: 'drop' creates the run, then cuts the connection; '503' creates nothing. */
+  postFaults: [] as Array<'drop' | '503'>,
+  /** Idempotency-Key -> run_id, as Hermes replays an accepted key. */
+  keys: new Map<string, string>(),
+  hugeToolsets: undefined as undefined | 'declared' | 'chunked',
   counter: 0,
   reset() {
     this.requests = []; this.runs.clear(); this.statusDown = false; this.redirectCapabilities = false;
+    this.postFaults = []; this.keys.clear(); this.hugeToolsets = undefined;
     this.toolsets = [{ name: 'terminal', enabled: false, tools: ['terminal'] }, { name: 'web', enabled: false, tools: ['web_search'] }];
     this.capabilities = {
       object: 'hermes.api_server.capabilities', platform: 'hermes-agent', model: 'hermes-agent',
@@ -70,9 +76,21 @@ async function startFake(): Promise<void> {
         if (fake.redirectCapabilities) { res.writeHead(302, { location: `${fake.url}/elsewhere` }); return res.end(); }
         return send(200, fake.capabilities);
       }
-      if (req.method === 'GET' && path === '/v1/toolsets') return send(200, fake.toolsets);
+      if (req.method === 'GET' && path === '/v1/toolsets') {
+        const big = `[${'"x",'.repeat(600_000)}"x"]`; // ~2.4 MB of JSON
+        if (fake.hugeToolsets === 'declared') { res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(big) }); return res.end(big); }
+        if (fake.hugeToolsets === 'chunked') { res.writeHead(200, { 'content-type': 'application/json' }); for (let i = 0; i < big.length; i += 65_536) res.write(big.slice(i, i + 65_536)); return res.end(); }
+        return send(200, fake.toolsets);
+      }
       if (req.method === 'POST' && path === '/v1/runs') {
+        const fault = fake.postFaults.shift();
+        if (fault === '503') return send(503, { error: { message: 'Gateway draining' } });
+        const key = String(req.headers['idempotency-key'] ?? '');
+        const known = key ? fake.keys.get(key) : undefined;
+        if (known) { res.writeHead(202, { 'content-type': 'application/json', 'idempotency-replayed': 'true' }); return res.end(JSON.stringify({ run_id: known, status: 'running' })); }
         const runId = `run_${(++fake.counter).toString(16).padStart(8, '0')}`;
+        if (key) fake.keys.set(key, runId);
+        if (fault === 'drop') { fake.runs.set(runId, { status: 'running' }); return req.socket.destroy(); }
         fake.runs.set(runId, { status: 'running' });
         return send(202, { run_id: runId, status: 'started' });
       }
@@ -491,4 +509,57 @@ test('a cancellation recorded while the submission is in flight also stops the H
   assert.equal(fake.runPosts().length, 1);
   assert.equal(fake.stops().length, 1, 'the run Hermes accepted is stopped');
   assert.equal(fake.runs.get(fake.lastRunId())!.status, 'cancelled');
+});
+
+test('a lost submission response is retried once with the same Idempotency-Key and adopts the one run Hermes created', async () => {
+  fake.postFaults = ['drop'];
+  const task = (await submitTask(t, A.owner, A.tenantId, A.agentId, 'h-lost', { prompt: 'x' })).json().data;
+  assert.equal(task.status, 'running', task.error);
+  const posts = fake.runPosts();
+  assert.equal(posts.length, 2, 'one retry');
+  assert.equal(posts[0]!.headers['idempotency-key'], `genie-task-${task.id}`);
+  assert.equal(posts[1]!.headers['idempotency-key'], posts[0]!.headers['idempotency-key']);
+  assert.equal(fake.runs.size, 1, 'Hermes holds exactly one run for the task');
+  fake.complete(fake.lastRunId());
+  assert.equal((await getTask(A, task.id)).status, 'succeeded');
+});
+
+test('an unconfirmed submission fails visibly and says the run may exist on Hermes', async () => {
+  fake.postFaults = ['503', '503'];
+  const task = (await submitTask(t, A.owner, A.tenantId, A.agentId, 'h-unconfirmed', { prompt: 'x' })).json().data;
+  assert.equal(task.status, 'failed');
+  assert.match(task.error, /Hermes did not confirm the run \(HTTP 503, twice\)\. It may still have started on Hermes under idempotency key genie-task-/);
+  assert.equal(fake.runPosts().length, 2, 'retried exactly once');
+
+  fake.reset();
+  fake.postFaults = ['503'];
+  const second = (await submitTask(t, A.owner, A.tenantId, A.agentId, 'h-503-once', { prompt: 'x' })).json().data;
+  assert.equal(second.status, 'running', 'one transient 503 is absorbed by the retry');
+  assert.equal(fake.runs.size, 1);
+});
+
+test('oversized Hermes responses are refused, declared or streamed', async () => {
+  for (const mode of ['declared', 'chunked'] as const) {
+    fake.reset();
+    fake.hugeToolsets = mode;
+    assert.deepEqual(await hermes.availability(), { available: false, detail: 'Hermes response was too large.' }, mode);
+  }
+});
+
+test('a value that merely contains the mask sentinel counts as masked', async () => {
+  const env = withoutMaskedValues({
+    DATABASE_URL: `postgres://genie_app:${MASKED_ENV_VALUE}@db:5432/genie`,
+    HERMES_BASE_URL: `http://${MASKED_ENV_VALUE}:8642`,
+    PADDED: `  ${MASKED_ENV_VALUE}  `,
+    REAL: 'postgres://genie_app:0123abcd@db:5432/genie',
+  });
+  assert.deepEqual(env, { REAL: 'postgres://genie_app:0123abcd@db:5432/genie' });
+  resetConfigForTests();
+  try {
+    assert.throws(() => loadConfig({ ...process.env, DATABASE_URL: `postgres://genie_app:${MASKED_ENV_VALUE}@db/genie` }),
+      /Missing required environment variable DATABASE_URL \(unset, empty or masked as __GENIE_NOT_AVAILABLE__\)/);
+  } finally {
+    resetConfigForTests();
+    loadConfig();
+  }
 });

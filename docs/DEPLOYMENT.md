@@ -82,7 +82,14 @@ owner bootstrap) treats that exact value as **unset**:
 * a masked required setting fails at startup as "missing";
 * a masked optional setting takes its default (a masked `TRUSTED_PROXIES`
   means "trust no proxy");
-* the masked value is never used as a key, password, URL or address.
+* the masked value is never used as a key, password, URL or address;
+* a value that merely **contains** the sentinel counts as masked too, e.g. a
+  `DATABASE_URL` assembled from a masked password.
+
+The role-provisioning paths (`infra/db-init/01-genie-roles.sh` and
+`infra/db/provision-roles.sql`) refuse a role password that contains the
+sentinel or is shorter than 16 characters, so a masked value can never become
+a database password.
 
 `infra/scripts/backup-db.sh` and `restore-rehearsal.sh` refuse to run if any
 of their `PG*` settings is masked.
@@ -222,7 +229,7 @@ migrations its build does not know.
 
 ## 6. What was actually verified (locally, PostgreSQL 16, no Docker daemon)
 
-* **Integration suite:** all 111 tests pass (99 at a290196, plus 12 for the
+* **Integration suite:** all 115 tests pass (99 at a290196, plus 16 for the
   constrained Hermes adapter; see `docs/HERMES.md`). This includes:
   * the startup gate (unsafe roles refused before any migration, RLS
     tampering detected, pending/modified/unknown migrations refused);

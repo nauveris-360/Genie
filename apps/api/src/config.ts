@@ -12,14 +12,20 @@ import { parseAllowedOrigins } from './auth/originCheck.js';
  */
 export const MASKED_ENV_VALUE = '__GENIE_NOT_AVAILABLE__';
 
-/** Returns a copy of env without masked (sentinel) values. */
+/**
+ * Returns a copy of env without masked values. A value that merely CONTAINS the
+ * sentinel counts as masked too, e.g. a connection string assembled from a
+ * masked password (postgres://genie_app:__GENIE_NOT_AVAILABLE__@db/genie): no
+ * real setting ever contains it, and using it would only fail later and less
+ * clearly (or, for a password, make the sentinel the password).
+ */
 export function withoutMaskedValues(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(env).filter(([, v]) => v?.trim() !== MASKED_ENV_VALUE));
+  return Object.fromEntries(Object.entries(env).filter(([, v]) => !v?.includes(MASKED_ENV_VALUE)));
 }
 
 function required(name: string, value: string | undefined): string {
   if (!value || value.trim() === '') {
-    throw new Error(`Missing required environment variable ${name}. Copy .env.example and fill it in.`);
+    throw new Error(`Missing required environment variable ${name} (unset, empty or masked as ${MASKED_ENV_VALUE}). Copy .env.example and fill it in.`);
   }
   return value;
 }
