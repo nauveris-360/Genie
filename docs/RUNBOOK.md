@@ -301,7 +301,7 @@ rebuilds them against the same database.
 
 ## Tests
 ```bash
-npm test     # 115 integration tests, serial, against DATABASE_URL in apps/api/.env.test
+npm test     # 116 integration tests, serial, against DATABASE_URL in apps/api/.env.test
 ```
 The suite migrates the test database from whatever state it is in, truncates
 data between files, and in `migrations.test.ts` drops and recreates the schema.

@@ -13,7 +13,8 @@
     "migrate": "npm run migrate --workspace=@genie/api",
     "migrate:rollback": "npm run migrate:rollback --workspace=@genie/api",
     "bootstrap:owner": "npm run bootstrap:owner --workspace=@genie/api",
-    "lint": "npm run lint --workspace=@genie/api"
+    "lint": "npm run lint --workspace=@genie/api",
+    "test:hermes-audit": "python3 -I -m unittest discover -s infra/hermes/tests"
   },
   "engines": {
     "node": ">=22.12 <23"

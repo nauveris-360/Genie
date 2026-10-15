@@ -1,0 +1,419 @@
+openapi: 3.1.0
+info:
+  title: Genie Agent Factory API (DRAFT PROPOSAL)
+  version: 0.1.0-draft
+  description: |
+    PROPOSAL ONLY. Not implemented, not agreed, not deployed. See
+    docs/proposals/AGENT-FACTORY.md. Intended for a separate private service
+    (genie-agent-factory, planned host factory.genie.readyqr.com behind
+    authenticated access), not for genie-core.
+
+    Scope of this draft: templates, tenant-scoped drafts made from templates,
+    and an owner-approval decision bound to a versioned digest of the exact
+    draft the owner reviewed. There is deliberately NO activation, provisioning,
+    deployment or credential endpoint: an approved draft is an approved
+    specification, nothing more. Activation is a later, separately agreed
+    contract.
+
+    Conventions follow the Genie v1 API (packages/contracts/openapi.yaml):
+    UUIDs, UTC ISO-8601 timestamps, `{data}` / `{data, page}` envelopes,
+    `{error: {code, message, requestId}}`, opaque session cookie plus CSRF
+    header on writes, and tenant membership re-checked on every
+    `/tenants/{tenantId}` route.
+servers:
+  - url: /api/v1
+security:
+  - cookieAuth: []
+tags:
+  - name: templates
+    description: Published, immutable agent templates.
+  - name: drafts
+    description: Tenant-scoped agent drafts and their owner-approval decision.
+paths:
+  /templates:
+    get:
+      tags: [templates]
+      operationId: listTemplates
+      summary: List published agent templates (latest version of each).
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Templates.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, page]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AgentTemplate' } }
+                  page: { $ref: '#/components/schemas/Page' }
+        '401': { $ref: '#/components/responses/Error' }
+  /templates/{templateId}/versions/{version}:
+    get:
+      tags: [templates]
+      operationId: getTemplateVersion
+      summary: One immutable template version.
+      parameters:
+        - { name: templateId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: version, in: path, required: true, schema: { $ref: '#/components/schemas/SemVer' } }
+      responses:
+        '200':
+          description: The template version.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: '#/components/schemas/AgentTemplate' } }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /tenants/{tenantId}/drafts:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [drafts]
+      operationId: listDrafts
+      summary: List this tenant's drafts.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - { name: status, in: query, required: false, schema: { $ref: '#/components/schemas/DraftStatus' } }
+      responses:
+        '200':
+          description: Drafts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, page]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AgentDraft' } }
+                  page: { $ref: '#/components/schemas/Page' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [drafts]
+      operationId: createDraft
+      summary: Create a draft from a template version (owner or admin).
+      security:
+        - { cookieAuth: [], csrfHeader: [] }
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DraftCreate' }
+      responses:
+        '201':
+          description: The persisted draft (status `draft`).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: '#/components/schemas/AgentDraft' } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /tenants/{tenantId}/drafts/{draftId}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/DraftId'
+    get:
+      tags: [drafts]
+      operationId: getDraft
+      summary: One draft, with the digest an approval must echo.
+      responses:
+        '200':
+          description: The draft.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: '#/components/schemas/AgentDraft' } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [drafts]
+      operationId: updateDraft
+      summary: Edit a draft. Allowed only in `draft` status; changes the digest.
+      security:
+        - { cookieAuth: [], csrfHeader: [] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DraftUpdate' }
+      responses:
+        '200':
+          description: The updated draft.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: '#/components/schemas/AgentDraft' } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /tenants/{tenantId}/drafts/{draftId}/submit:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/DraftId'
+    post:
+      tags: [drafts]
+      operationId: submitDraft
+      summary: Freeze the draft and request the owner's approval (status `awaiting_owner_approval`).
+      security:
+        - { cookieAuth: [], csrfHeader: [] }
+      responses:
+        '200':
+          description: The frozen draft with its pending approval.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: '#/components/schemas/AgentDraft' } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /tenants/{tenantId}/drafts/{draftId}/approval/decision:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/DraftId'
+    post:
+      tags: [drafts]
+      operationId: decideDraftApproval
+      summary: Owner approves or rejects exactly the draft version they reviewed.
+      description: |
+        Only a tenant **owner** may decide (admins may draft and submit, not
+        approve). The request echoes the `digest` the owner was shown; a
+        mismatch (any field changed since) returns 409
+        `approval_payload_mismatch`. Decisions are immutable; a second decision
+        returns 409 `approval_already_decided`; an expired request returns 409
+        `approval_expired`. Approving changes nothing outside this service.
+      security:
+        - { cookieAuth: [], csrfHeader: [] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalDecisionRequest' }
+      responses:
+        '200':
+          description: The decided draft.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: '#/components/schemas/AgentDraft' } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: genie_factory_sid
+      description: Opaque server-side session, host-only Secure HttpOnly SameSite cookie.
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: Must equal the session's CSRF token on every state-changing request.
+  parameters:
+    TenantId: { name: tenantId, in: path, required: true, schema: { type: string, format: uuid } }
+    DraftId: { name: draftId, in: path, required: true, schema: { type: string, format: uuid } }
+    Cursor: { name: cursor, in: query, required: false, schema: { type: string } }
+    Limit: { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1, maxLength: 200 } }
+  responses:
+    Error:
+      description: Error envelope.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+  schemas:
+    SemVer:
+      type: string
+      pattern: '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$'
+    Page:
+      type: object
+      required: [nextCursor]
+      properties: { nextCursor: { type: ['string', 'null'] } }
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code:
+              type: string
+              enum: [validation_error, unauthorized, forbidden, csrf_mismatch, not_found, idempotency_key_conflict,
+                     draft_not_editable, approval_payload_mismatch, approval_already_decided, approval_expired,
+                     capability_not_allowed, model_not_allowed, internal_error]
+            message: { type: string }
+            requestId: { type: string }
+    Capability:
+      type: string
+      description: |
+        Allowlisted capability names. v0.1 allows only text chat; every other
+        capability (tools, web, files, terminal, email, publishing, payments)
+        is a later, separately approved extension of this enum.
+      enum: [chat]
+    ModelPolicy:
+      type: object
+      additionalProperties: false
+      required: [freeOnly, allowedModelIds]
+      properties:
+        freeOnly:
+          type: boolean
+          const: true
+          description: v0.1 templates may only use verified-free models (Genie free-first policy).
+        allowedModelIds:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items: { type: string, pattern: '^openrouter/[A-Za-z0-9._/-]+(:free)?$' }
+    DataScope:
+      type: string
+      description: Genie resources the agent may read, always within its own tenant.
+      enum: [tenant_profile, websites, own_tasks]
+    ParameterSpec:
+      type: object
+      additionalProperties: false
+      required: [name, type, required]
+      properties:
+        name: { type: string, pattern: '^[a-z][a-z0-9_]{0,39}$' }
+        type: { type: string, enum: [string, integer, boolean, enum] }
+        required: { type: boolean }
+        enum: { type: array, items: { type: string }, maxItems: 20 }
+        maxLength: { type: integer, minimum: 1, maximum: 2000 }
+        description: { type: string, maxLength: 300 }
+    AgentTemplate:
+      type: object
+      additionalProperties: false
+      required: [id, slug, version, name, purpose, capabilities, modelPolicy, dataScopes, parameters, requiresOwnerApproval, templateDigest, publishedAt]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string, pattern: '^genie-[a-z][a-z0-9-]{1,40}$', description: 'Repository/agent name from docs/AGENT-DOMAINS.md, e.g. genie-marketing.' }
+        version: { $ref: '#/components/schemas/SemVer' }
+        name: { type: string, maxLength: 80 }
+        purpose: { type: string, maxLength: 1000 }
+        capabilities: { type: array, minItems: 1, uniqueItems: true, items: { $ref: '#/components/schemas/Capability' } }
+        modelPolicy: { $ref: '#/components/schemas/ModelPolicy' }
+        dataScopes: { type: array, uniqueItems: true, items: { $ref: '#/components/schemas/DataScope' } }
+        parameters: { type: array, maxItems: 30, items: { $ref: '#/components/schemas/ParameterSpec' } }
+        plannedHostname:
+          type: ['string', 'null']
+          pattern: '^[a-z0-9-]+\.genie\.readyqr\.com$'
+          description: Planned name only (docs/AGENT-DOMAINS.md); never provisioned by this service.
+        requiresOwnerApproval: { type: boolean, const: true }
+        templateDigest: { type: string, pattern: '^[0-9a-f]{64}$', description: 'SHA-256 of the canonical template (format v1).' }
+        publishedAt: { type: string, format: date-time }
+      examples:
+        - id: 7f9c2a1e-3b4d-4c5e-8f60-1a2b3c4d5e6f
+          slug: genie-marketing
+          version: 0.1.0
+          name: Marketing copy assistant
+          purpose: Drafts marketing copy for the tenant's websites from a short brief. Text only; publishes nothing.
+          capabilities: [chat]
+          modelPolicy: { freeOnly: true, allowedModelIds: ['openrouter/nvidia/nemotron-3-super-120b-a12b:free'] }
+          dataScopes: [tenant_profile, websites]
+          parameters:
+            - { name: brand_voice, type: enum, required: true, enum: [friendly, formal, playful] }
+            - { name: audience, type: string, required: false, maxLength: 200 }
+          plannedHostname: marketing.genie.readyqr.com
+          requiresOwnerApproval: true
+          templateDigest: 3f1d0c6c1b9e4f0a8d7c6b5a4e3f2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e
+          publishedAt: '2026-10-15T12:00:00Z'
+    DraftStatus:
+      type: string
+      enum: [draft, awaiting_owner_approval, approved, rejected, expired]
+    DraftCreate:
+      type: object
+      additionalProperties: false
+      required: [templateId, templateVersion, name, parameters]
+      properties:
+        templateId: { type: string, format: uuid }
+        templateVersion: { $ref: '#/components/schemas/SemVer' }
+        name: { type: string, minLength: 1, maxLength: 80 }
+        parameters: { type: object, additionalProperties: { type: ['string', 'integer', 'boolean'] }, maxProperties: 30 }
+        modelId: { type: string, description: 'One of the template allowedModelIds; defaults to the first.' }
+        providerConnectionId:
+          type: ['string', 'null']
+          format: uuid
+          description: Reference to an existing Genie provider connection of this tenant. Never a credential.
+    DraftUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        parameters: { type: object, additionalProperties: { type: ['string', 'integer', 'boolean'] }, maxProperties: 30 }
+        modelId: { type: string }
+        providerConnectionId: { type: ['string', 'null'], format: uuid }
+    Approval:
+      type: object
+      additionalProperties: false
+      required: [id, status, digestVersion, digest, requestedBy, requestedAt, expiresAt, decidedBy, decidedAt, reason]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, approved, rejected, expired] }
+        digestVersion: { type: integer, const: 1 }
+        digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        requestedBy: { type: string, format: uuid }
+        requestedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        decidedBy: { type: ['string', 'null'], format: uuid }
+        decidedAt: { type: ['string', 'null'], format: date-time }
+        reason: { type: ['string', 'null'], maxLength: 500 }
+    AgentDraft:
+      type: object
+      additionalProperties: false
+      required: [id, tenantId, templateId, templateVersion, templateDigest, name, parameters, modelId, providerConnectionId, status, digest, approval, createdBy, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        templateId: { type: string, format: uuid }
+        templateVersion: { $ref: '#/components/schemas/SemVer' }
+        templateDigest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        name: { type: string }
+        parameters: { type: object, additionalProperties: { type: ['string', 'integer', 'boolean'] } }
+        modelId: { type: string }
+        providerConnectionId: { type: ['string', 'null'], format: uuid }
+        status: { $ref: '#/components/schemas/DraftStatus' }
+        digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Current approval digest (format v1) of exactly the fields an approval binds; changes on every edit.
+        approval: { oneOf: [ { $ref: '#/components/schemas/Approval' }, { type: 'null' } ] }
+        createdBy: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ApprovalDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [decision, digest]
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+        digest: { type: string, pattern: '^[0-9a-f]{64}$', description: The digest the owner was shown. }
+        reason: { type: string, maxLength: 500 }

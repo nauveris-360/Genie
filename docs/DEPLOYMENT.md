@@ -229,7 +229,7 @@ migrations its build does not know.
 
 ## 6. What was actually verified (locally, PostgreSQL 16, no Docker daemon)
 
-* **Integration suite:** all 115 tests pass (99 at a290196, plus 16 for the
+* **Integration suite:** all 116 tests pass (99 at a290196, plus 17 for the
   constrained Hermes adapter; see `docs/HERMES.md`). This includes:
   * the startup gate (unsafe roles refused before any migration, RLS
     tampering detected, pending/modified/unknown migrations refused);

@@ -1,0 +1,50 @@
+# PROPOSAL ONLY — not installed anywhere. Reviewable systemd unit for the
+# Hermes gateway that would serve genie-core's private API calls
+# (docs/HERMES-SERVICE-PLAN.md). Installing it, creating the Docker network and
+# the firewall rules are infrastructure changes that need owner approval.
+#
+# <HERMES_BIN> is the `hermes` launcher of the existing install (Codex: confirm
+# the path, e.g. the install's venv/bin/hermes). No secret appears here: the
+# API key and the OpenRouter key live only in the profile's 0600 .env.
+#
+# Audit before enabling:
+#   <hermes venv python> -I infra/hermes/audit_hermes_profile.py \
+#     --profile-dir /home/hermes/.hermes/profiles/readyqr \
+#     --expect-model 'nvidia/nemotron-3-super-120b-a12b:free' \
+#     --install-dir <hermes checkout> --stage enabled \
+#     --unit /etc/systemd/system/hermes-readyqr.service
+
+[Unit]
+Description=Hermes gateway, readyqr profile (private API server for genie-core)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+# An empty directory owned by hermes: Hermes injects context files (AGENTS.md,
+# SOUL.md, ...) found in its working directory into every system prompt.
+WorkingDirectory=/home/hermes/readyqr-empty-cwd
+# Wait (bounded by TimeoutStartSec) until the genie-hermes bridge address exists;
+# the API server binds to it and nothing else.
+ExecStartPre=/bin/sh -c 'until ip -4 -o addr show | grep -q " 10.88.88.1/"; do sleep 2; done'
+TimeoutStartSec=120
+ExecStart=<HERMES_BIN> -p readyqr gateway
+# Only non-secret basics. No credentials, base URLs, HERMES_* routing variables
+# or EnvironmentFile: the profile .env is the only credential source.
+Environment=HOME=/home/hermes PATH=/usr/local/bin:/usr/bin:/bin
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

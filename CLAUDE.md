@@ -12,8 +12,12 @@
 * Keep genie-hermes, genie-infra and genie-agent-factory private or behind authenticated access.
 * Database roles: the app runs as a non-superuser, non-BYPASSRLS runtime role. Migrations run as the schema-owner role. Never disable RLS or grant BYPASSRLS to make something work. The production startup gate (`apps/api/src/db/safety.ts`) enforces this; see `docs/DEPLOYMENT.md`.
 * Coolify masks unneeded keys as `__GENIE_NOT_AVAILABLE__`; Genie treats that value as unset everywhere (`withoutMaskedValues` in `apps/api/src/config.ts`). Keep it that way for any new setting or script.
+* Hermes on VPS 2 is reviewed at commit 835c3dd (`docs/HERMES.md`). Check any Hermes profile with `infra/hermes/audit_hermes_profile.py` (prints names and booleans only, never values); the networking/service plan is a proposal in `docs/HERMES-SERVICE-PLAN.md`.
 * Restore rehearsals run only on a disposable PostgreSQL server (`infra/scripts/restore-rehearsal.sh` refuses a server hosting other databases).
 * Pushes go to the working branch only; no pull request unless asked. The repo has no `main` branch yet.
+
+## Roadmap (owner)
+Genie is the central assistant ("Jarvis"). Build order: Voice, then Agent Factory, then Marketing. The Agent Factory is a separate private service; `docs/proposals/AGENT-FACTORY.md` is a draft/template/owner-approval proposal only (no activation).
 
 ## Planned domains
 See `docs/AGENT-DOMAINS.md` (planned names, not provisioned). This repo's backend is **genie-core → api.genie.readyqr.com**; the UI is **genie-command → genie.readyqr.com**. The public test is being prepared with option A (same-origin proxy: the browser calls relative `/api/v1` on genie.readyqr.com); see `docs/DEPLOYMENT.md`. No CORS. Never set cookie `Domain` to a parent domain.

@@ -38,15 +38,20 @@ const fake = {
   /** Idempotency-Key -> run_id, as Hermes replays an accepted key. */
   keys: new Map<string, string>(),
   hugeToolsets: undefined as undefined | 'declared' | 'chunked',
+  bareToolsets: false,
   counter: 0,
   reset() {
     this.requests = []; this.runs.clear(); this.statusDown = false; this.redirectCapabilities = false;
-    this.postFaults = []; this.keys.clear(); this.hugeToolsets = undefined;
+    this.postFaults = []; this.keys.clear(); this.hugeToolsets = undefined; this.bareToolsets = false;
     this.toolsets = [{ name: 'terminal', enabled: false, tools: ['terminal'] }, { name: 'web', enabled: false, tools: ['web_search'] }];
     this.capabilities = {
       object: 'hermes.api_server.capabilities', platform: 'hermes-agent', model: 'hermes-agent',
       auth: { type: 'bearer', required: true },
-      features: { chat_completions: true, responses_api: true, run_submission: true, run_status: true, run_events_sse: true, run_stop: true },
+      // Shape of Hermes 835c3dd (gateway/platforms/api_server.py _handle_capabilities).
+      features: {
+        chat_completions: true, responses_api: true, run_submission: true, run_status: true, run_events_sse: true, run_stop: true,
+        runs_idempotency: { supported: true, durable: true, retention_seconds: 86400 },
+      },
     };
   },
   runPosts() { return this.requests.filter((r) => r.method === 'POST' && r.path === '/v1/runs'); },
@@ -80,7 +85,8 @@ async function startFake(): Promise<void> {
         const big = `[${'"x",'.repeat(600_000)}"x"]`; // ~2.4 MB of JSON
         if (fake.hugeToolsets === 'declared') { res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(big) }); return res.end(big); }
         if (fake.hugeToolsets === 'chunked') { res.writeHead(200, { 'content-type': 'application/json' }); for (let i = 0; i < big.length; i += 65_536) res.write(big.slice(i, i + 65_536)); return res.end(); }
-        return send(200, fake.toolsets);
+        // Hermes 835c3dd wraps the inventory; fake.bareToolsets serves the documented bare-array form.
+        return send(200, fake.bareToolsets ? fake.toolsets : { object: 'list', platform: 'api_server', data: fake.toolsets });
       }
       if (req.method === 'POST' && path === '/v1/runs') {
         const fault = fake.postFaults.shift();
@@ -561,5 +567,31 @@ test('a value that merely contains the mask sentinel counts as masked', async ()
   } finally {
     resetConfigForTests();
     loadConfig();
+  }
+});
+
+test('preflight matches Hermes 835c3dd: wrapped toolset inventory, durable idempotency, nothing looser', async () => {
+  const ready = async () => (await hermes.availability());
+  assert.equal((await ready()).available, true, 'wrapped {object, platform, data} inventory is accepted');
+  fake.bareToolsets = true;
+  assert.equal((await ready()).available, true, 'the documented bare array is accepted too');
+
+  fake.reset();
+  fake.toolsets = [];
+  assert.deepEqual(await ready(), { available: false, detail: 'Hermes toolsets check returned no toolset inventory.' });
+
+  fake.reset();
+  fake.bareToolsets = true;
+  fake.toolsets = { object: 'list', platform: 'cli', data: [] } as unknown as Array<Record<string, unknown>>;
+  assert.deepEqual(await ready(), { available: false, detail: 'Hermes toolsets check returned an unrecognised response.' }, 'another platform inventory is refused');
+
+  fake.reset();
+  fake.toolsets.push({ name: 'my_plugin', enabled: true, tools: ['plugin_tool'] }); // plugin toolsets are listed and default ON
+  assert.match((await ready()).detail, /toolsets enabled for its api_server platform \(my_plugin\)/);
+
+  for (const idem of [undefined, { supported: true, durable: false }, { supported: false, durable: true }]) {
+    fake.reset();
+    (fake.capabilities.features as Record<string, unknown>).runs_idempotency = idem;
+    assert.deepEqual(await ready(), { available: false, detail: 'Hermes API server does not offer durable run idempotency.' }, JSON.stringify(idem));
   }
 });

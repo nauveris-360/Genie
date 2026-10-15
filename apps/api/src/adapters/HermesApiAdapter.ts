@@ -196,10 +196,24 @@ export class HermesApiAdapter implements AgentAdapter {
       const features = isRecord(caps.json.features) ? caps.json.features : {};
       const missing = REQUIRED_FEATURES.filter((f) => features[f] !== true);
       if (missing.length) return `Hermes API server does not offer ${missing.join(', ')}.`;
+      // The one-retry rule in submit() relies on Hermes replaying an Idempotency-Key, durably.
+      const idem = features.runs_idempotency;
+      if (!isRecord(idem) || idem.supported !== true || idem.durable !== true) {
+        return 'Hermes API server does not offer durable run idempotency.';
+      }
 
       const tools = await this.request('GET', '/v1/toolsets');
-      if (tools.status !== 200 || !Array.isArray(tools.json)) return `Hermes toolsets check failed (HTTP ${tools.status}).`;
-      const enabled = tools.json
+      if (tools.status !== 200) return `Hermes toolsets check failed (HTTP ${tools.status}).`;
+      // Hermes 835c3dd answers {object: "list", platform: "api_server", data: [...]}; the API
+      // server docs show a bare array. Accept both, and nothing else.
+      const body = tools.json;
+      const inventory = Array.isArray(body)
+        ? body
+        : isRecord(body) && body.object === 'list' && body.platform === 'api_server' && Array.isArray(body.data) ? body.data : null;
+      if (!inventory) return 'Hermes toolsets check returned an unrecognised response.';
+      // Hermes always lists every configurable toolset (enabled or not); an empty inventory proves nothing.
+      if (inventory.length === 0) return 'Hermes toolsets check returned no toolset inventory.';
+      const enabled = inventory
         .filter((t) => !isRecord(t) || t.enabled !== false)
         .map((t) => (isRecord(t) && typeof t.name === 'string' ? excerpt(t.name, 40) : 'unrecognised entry'));
       if (enabled.length) {

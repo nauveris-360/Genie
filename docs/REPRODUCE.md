@@ -10,6 +10,7 @@ and thrown away.
 * PostgreSQL 16 server you can administer, used **only** for a disposable test
   database. The suite truncates every table between files.
 * `openssl`, `sha256sum`, `tar`.
+* Python 3.11+ with PyYAML or ruamel.yaml, for the offline Hermes audit tests.
 * Network access to the npm registry, for `npm ci`.
 
 ## 1. Verify and unpack the archive
@@ -51,8 +52,12 @@ npm test                          # integration suite, serial
 npx --yes @redocly/cli@2.62.1 lint packages/contracts/openapi.yaml
 npm audit                         # expect: found 0 vulnerabilities
 bash -n infra/scripts/*.sh infra/db-init/*.sh
+npm run test:hermes-audit         # offline Hermes profile audit, python3 + PyYAML or ruamel.yaml
+npx --yes @redocly/cli@2.62.1 lint --config packages/contracts/redocly.yaml docs/proposals/agent-factory.openapi.yaml
 ```
-Expected at the handoff commit: `# tests 115`, `# pass 115`, `# fail 0`.
+Expected at the handoff commit:
+* integration suite: `# tests 116`, `# pass 116`, `# fail 0`;
+* audit tests: `Ran 28 tests … OK`.
 
 Run one file:
 ```bash

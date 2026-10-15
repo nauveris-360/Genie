@@ -1,10 +1,19 @@
 # Hermes integration: verification and constrained adapter
 
-Status (14 October 2026): **Hermes has an official programmatic interface.** A
-constrained Genie client for it is implemented and tested locally against a
-stand-in server. It is **not enabled anywhere**. Turning it on requires the
-checks and owner approvals listed under "Blockers" below. Codex owns the
-adapter contract and reviews this before anything is enabled.
+Status (15 October 2026): **Hermes has an official programmatic interface.**
+A constrained Genie client for it is implemented and tested locally against a
+stand-in server. It has now been reviewed against the exact Hermes commit
+installed on VPS 2 (`v0.21.6+774.g835c3dd`, commit `835c3dd038d9`); see
+"Compatibility review at 835c3dd" below. That review found and fixed one
+adapter incompatibility, and added three new required Hermes settings. It is
+**not enabled anywhere**. Turning it on requires the checks and owner approvals
+listed under "Blockers" below. Codex owns the adapter contract and reviews this
+before anything is enabled.
+
+Offline audit: `infra/hermes/audit_hermes_profile.py` checks a profile against
+everything below that can be checked from files. It prints only check ids,
+PASS/FAIL/WARN/MANUAL and names, never a value. The private networking and
+service plan is in `docs/HERMES-SERVICE-PLAN.md`.
 
 ## What was verified, and from where
 
@@ -65,6 +74,26 @@ these properties:
    they use Hermes' configured main model, not the per-request model.
 5. **Memory and skills are per Hermes profile.** They are shared by every run
    on that profile unless disabled.
+
+## Compatibility review at 835c3dd (installed on VPS 2)
+
+The source was read at commit `835c3dd038d9` through raw.githubusercontent.com,
+file by file; the full tarball was not reachable from here. `api_server.py` and
+`api_server_runs.py` at that commit are byte-identical to the main-branch
+copies reviewed on 14 October. Nothing was executed and nothing contacted
+VPS 2.
+
+| Area | Finding at 835c3dd (source) | Consequence for Genie |
+| --- | --- | --- |
+| `GET /v1/toolsets` shape | Returns `{object: "list", platform: "api_server", data: [...]}`, **not** the bare array the docs show (`api_server.py` `_handle_toolsets`) | **Adapter bug, fixed.** The old preflight required an array, so it would always have reported Hermes unavailable (fail-closed but unusable). It now accepts this wrapper (requiring `platform: api_server`) or a bare array, and refuses an empty inventory |
+| Run idempotency | `features.runs_idempotency = {supported, durable, retention_seconds: 86400}`; keys are durable in SQLite, scoped to the API key, and a same-body replay returns the original `run_id` (`api_server_run_idempotency.py`, `api_server_runs.py`) | The adapter now **requires** `supported` and `durable` to be `true`, because its one-retry rule depends on them |
+| Served model | `runtime` on `GET /v1/runs/{id}` is the agent's `provider`/`model` after the turn, which a `fallback_providers` switch would change (`_served_runtime`). OpenRouter is an aggregator provider, so model ids are **not** normalized (`model_normalize._AGGREGATOR_PROVIDERS`) | `runtime.model` should equal the id Genie sends (`nvidia/nemotron-3-super-120b-a12b:free`). The adapter's exact comparison is compatible; still to be observed in the authorized smoke test |
+| Tool resolution | An explicit empty `platform_toolsets.api_server: []` resolves to no toolsets. The agent treats `enabled_toolsets=[]` as "none", not "all" (`model_tools._select_tool_names`). No platform-native toolset is recovered for `api_server`. Context-engine and memory-provider tools are gated on the same list. **Plugin toolsets default ON** unless listed in `known_plugin_toolsets` | Empty list = zero tools, confirmed in source. Plugin toolsets appear in `/v1/toolsets`, so Genie's preflight refuses them. MCP servers do not appear there (item 2 below) |
+| Profile `.env` isolation | Single-profile gateway (`hermes -p readyqr gateway`): loads only `<profile>/.env` (override=True), then the **install directory's `.env`** as a gap-filler, then **`/etc/hermes/.env`** (managed scope, override=True, beats the profile). The root `~/.hermes/.env` is not loaded. Shell or systemd environment credentials survive when the profile `.env` does not define them | New items 11, 12 and 13 below |
+| **Credential pool fallback** | In profile mode `read_credential_pool("openrouter")` returns the profile's own `auth.json` entries, or, **if it has none, the root `~/.hermes/auth.json` entries**. `load_pool` adds an entry seeded from `OPENROUTER_API_KEY`, and the pool rung is resolved **before** the plain `.env` key (`auth.py`, `credential_pool.py`, `runtime_provider._ladder_rungs`) | **New blocker-level item 14.** If the administrator's root store has an OpenRouter pool entry, `readyqr` runs could be served, and billed, with that key instead of the $0-capped one |
+| Background review | `auxiliary.background_review.enabled` defaults to **true** (fail-open). After a turn it may fork a review agent on the same runtime (provider, model, credentials). The API server does not pass `skip_background_review` | **New item 15:** must be explicitly `false`. With memory off and no skills tool it is unlikely to trigger for single-turn tool-free runs, but that is not proven |
+| Auxiliary upgrades | `prefer_fast_model` applies only to `title_generation`; `model_upgrade_enabled` belongs to title generation. With `auxiliary.*` on `auto`, side tasks use the **configured main model** (`model.default`), not the per-request model | Owner's settings (title off, both upgrades false, all `auto`, no `fallback_chain`) are correct; `model.default` must be the free model (item 4) |
+| Startup guard | The API server refuses to start without an `API_SERVER_KEY` of 16+ characters that is not a placeholder | Matches Genie's own 16-character minimum; the service plan uses 64 hex characters |
 
 ## What the Genie adapter enforces (`apps/api/src/adapters/HermesApiAdapter.ts`)
 
@@ -129,8 +158,12 @@ disabled-agent check and the free-first policy re-run at dispatch time.
    `GET /v1/capabilities` reports `run_submission`, `run_status` and `run_stop`
    with `auth.required: true`.
 2. **Codex verifies the Hermes configuration on VPS 2** against every item in
-   "Preventive Hermes configuration" below. Genie can check only the toolset
-   item over the API.
+   "Preventive Hermes configuration" below, by running
+   `infra/hermes/audit_hermes_profile.py` as the `hermes` account. The owner's
+   15 October settings cover items 1–7 except two items the owner list does
+   not mention: **item 14** (root credential pool) and **item 15**
+   (`auxiliary.background_review.enabled: false`). Items 11–13 and 16 are also
+   not yet confirmed. Genie can check only the toolset item over the API.
 3. **Owner decision on credentials:** Hermes will run on the platform's own
    OpenRouter key, for the one bound tenant only. Multi-tenant Hermes means one
    Hermes profile per tenant; that is not designed or implemented.
@@ -138,7 +171,8 @@ disabled-agent check and the free-first policy re-run at dispatch time.
    with the pricing sync having verified it. The Hermes model must be on it.
 5. **Networking:** genie-core can reach Hermes on a private address. Hermes is
    never exposed publicly (hermes.genie.readyqr.com stays private or behind
-   authenticated access).
+   authenticated access). The proposed plan, not applied, is in
+   `docs/HERMES-SERVICE-PLAN.md`.
 6. **A real tool-free smoke test**, which BUILD-SPEC requires explicit
    authorization for. It must also confirm that a completed run reports
    `runtime.provider` and `runtime.model` in exactly the form Genie sends: the
@@ -170,10 +204,46 @@ version.
 | 7 | No memory | `memory.memory_enabled: false`, `memory.user_profile_enabled: false`, no `memory.provider` (e.g. Honcho) | Memory is per profile and would carry content between runs | No |
 | 8 | No private context files | no `SOUL.md`, `AGENTS.md`, `.hermes.md`, `CLAUDE.md` or `.cursorrules` with private content in the Hermes account's home or the gateway's working directory | They are injected into the system prompt and can surface in answers | No |
 | 9 | Private, authenticated API | `API_SERVER_ENABLED=true`; `API_SERVER_HOST` loopback or the private Docker network only; dedicated random `API_SERVER_KEY` (16+ chars, used nowhere else); `API_SERVER_CORS_ORIGINS` unset | The API server can run whatever the profile allows | Partly: auth required (preflight), no redirects |
-| 10 | Provider-side spending cap | a dedicated OpenRouter key for this Hermes profile; if the account offers a per-key credit or spend limit, set it to zero | The only control that still stops spending if items 3–6 are ever wrong | No. Owner action; a provider-account change needs owner approval |
+| 10 | Provider-side spending cap | a dedicated OpenRouter key for this Hermes profile; if the account offers a per-key credit or spend limit, set it to zero | The only control that still stops spending if items 3–6 or 14–15 are ever wrong | No. Owner action; a provider-account change needs owner approval |
+| 11 | No install-directory credentials | the Hermes checkout's `.env` defines no credentials or base URLs | Hermes loads it after the profile `.env` to fill gaps | No; audit `INSTALL-ENV` |
+| 12 | No managed scope | `/etc/hermes/config.yaml` and `/etc/hermes/.env` absent (or reviewed) | The managed scope overrides every profile's config and `.env` | No; audit `MANAGED-SCOPE` |
+| 13 | Clean service environment | the systemd unit sets no credential, base-URL, `HERMES_KANBAN_TASK`, `HERMES_MANAGED_DIR` or `HERMES_HOME` variables and loads no `EnvironmentFile` | Process-environment credentials survive when the profile `.env` does not define them | No; audit `UNIT-*` |
+| 14 | **No root credential-pool fallback** | the root `~/.hermes/auth.json` has **no** `credential_pool.openrouter` entries; or the profile's own `auth.json` pool holds exactly the dedicated key (a non-empty profile pool shadows the root one) | Otherwise runs can use the administrator's OpenRouter key, which the $0 cap does not cover | No; audit `POOL-ROOT-FALLBACK`, `POOL-PROFILE` |
+| 15 | No background review | `auxiliary.background_review.enabled: false` | Defaults on; a post-turn fork on the same key and model | No; audit `AUX-BACKGROUND-REVIEW` |
+| 16 | No external secret sources | no `secrets:` block and no `.op.env` in the profile | Bitwarden or 1Password sources can inject other credentials | No; audit `SECRET-SOURCES` |
 
-With items 1–9 in place, the remaining Genie-side check (served model equals
+With items 1–9 and 11–16 in place, the remaining Genie-side check (served model equals
 requested model) is a tripwire. It is not a spending control.
+
+## Offline profile audit (`infra/hermes/audit_hermes_profile.py`)
+
+* Python standard library plus PyYAML or ruamel.yaml, whichever the Hermes
+  venv has.
+* It reads the profile's `config.yaml`, `.env` and `auth.json`, the root
+  `auth.json`, the install directory's `.env`, `/etc/hermes` and, optionally,
+  the systemd unit.
+* It reports PASS, FAIL, WARN or MANUAL per check, by id. Exit 0 means no
+  required check failed.
+* It never prints a value: not even the model id it compares, and not parser
+  messages, which can quote secret-bearing lines.
+* `--stage disabled` is for today: the API server must be off. `--stage
+  enabled` adds the key, bind-address, port, CORS and unit checks.
+
+Tests: 28 unittest cases in `infra/hermes/tests/`. Each runs the script as a
+subprocess (`python -I`), as an operator would:
+* a golden profile passes;
+* each misconfiguration fails its own check;
+* in every case, canary secrets placed in `.env`, `config.yaml`, `auth.json`,
+  malformed YAML and the unit file never appear in text or JSON output;
+* the shipped unit template passes every unit check.
+
+They run under PyYAML and under ruamel.yaml 0.18.16 (no PyYAML), and five
+mutations were confirmed:
+* ignoring the root pool;
+* ignoring background review;
+* leaking the model id;
+* printing the YAML parser's traceback;
+* printing the API key.
 
 ## Edge cases and known limits
 
@@ -195,7 +265,7 @@ requested model) is a tripwire. It is not a spending control.
 
 ## Tests run (local, stand-in Hermes server, no model calls)
 
-`apps/api/test/integration/hermesAdapter.test.ts`, 16 tests:
+`apps/api/test/integration/hermesAdapter.test.ts`, 17 tests:
 
 * **Preflight:** readiness is unavailable for any enabled or unlabelled toolset,
   for auth not required, a missing run feature, a redirect (not followed, key
@@ -236,12 +306,20 @@ requested model) is a tripwire. It is not a spending control.
 * **Sentinel inside a value:** a connection string or URL containing
   `__GENIE_NOT_AVAILABLE__` counts as masked, and a required setting then fails
   as "missing (… masked …)".
+* **835c3dd compatibility:**
+  * the wrapped `{object, platform: api_server, data}` inventory and the
+    documented bare array are accepted;
+  * another platform's inventory, or an empty inventory, is refused;
+  * an enabled plugin toolset is refused;
+  * missing or non-durable `runs_idempotency` is refused.
 * **Races:**
   * a cancellation recorded during a status check wins;
   * a cancellation recorded while a submission is in flight also stops the
     run Hermes accepted.
 
-Sixteen of these guarantees were confirmed by mutation: disabling each one in
-the code made the matching test fail. The early refusal of a body declared as
+Twenty of these guarantees were confirmed by mutation: disabling each one in
+the code made the matching test fail. Restoring the old array-only toolset
+parsing fails 13 of the 17 tests, because every dispatch path then reports
+Hermes unavailable against the real response shape. The early refusal of a body declared as
 too large is not separately detected, because the streaming cap still refuses
 it; it is defence in depth.
